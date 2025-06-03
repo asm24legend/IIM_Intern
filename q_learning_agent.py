@@ -16,14 +16,21 @@ class TDAgent:
         self.learning_rate = learning_rate
         self.discount_factor = discount_factor
         self.epsilon = epsilon
-        self.epsilon_min = 0.05
+        self.epsilon_min = 0.01
         self.epsilon_decay = 0.997
         
         # Initialize Q-table
-        self.q_table = defaultdict(lambda: np.zeros(action_space.shape[0]))
+        self.q_table = defaultdict(lambda: np.zeros(self.action_space.shape[0]))
         
         # TD error history for monitoring learning
         self.td_errors = []
+        
+        # Number of discrete levels for order quantities and lead time reductions
+        self.num_order_levels = 10
+        self.num_lead_time_levels = 4  # 0 to max_lead_time_reduction
+        
+        # Calculate the size of each discrete level
+        self.order_level_size = self.action_space.high[0] / self.num_order_levels
     
     def discretize_state(self, state):
         """
@@ -31,30 +38,44 @@ class TDAgent:
         State is now just an array of inventory levels.
         """
         # Discretize inventory levels into bins of 50 units
-        return tuple(state.astype(int) // 50)
+        discrete_state = tuple(int(s / 50) for s in state)
+        return discrete_state
     
     def get_action(self, state, env):
         """
         Get action using epsilon-greedy policy
+        Returns both order quantities and lead time reduction decisions
         """
-        discrete_state = self.discretize_state(state)
-        
         if np.random.random() < self.epsilon:
-            # Exploration: random action
-            action = np.zeros(self.action_space.shape[0])
-            for i, (sku_id, sku) in enumerate(env.skus.items()):
-                if state[i] < env.calculate_rop(sku_id):
-                    # Calculate order quantity
-                    base_order = env.calculate_eoq(sku_id)
-                    action[i] = base_order * np.random.uniform(0.8, 1.2)  # Add some noise
-                    action[i] = np.clip(action[i], sku.min_order_qty, 
-                                      sku.max_stock - state[i])
-            return action.astype(np.int32)
-        else:
-            # Exploitation: choose best action from Q-table
-            return self.q_table[discrete_state].astype(np.int32)
+            # Random action
+            num_skus = len(env.skus)
+            order_quantities = np.random.randint(0, self.action_space.high[0], num_skus)
+            lead_time_reductions = np.random.randint(0, self.action_space.high[-1] + 1, num_skus)
+            return np.concatenate([order_quantities, lead_time_reductions])
+        
+        discrete_state = self.discretize_state(state)
+        q_values = self.q_table[discrete_state]
+        
+        # Split Q-values into order quantities and lead time reductions
+        num_skus = len(env.skus)
+        order_q_values = q_values[:num_skus]
+        lead_time_q_values = q_values[num_skus:]
+        
+        # Get best actions
+        best_orders = np.zeros(num_skus)
+        best_reductions = np.zeros(num_skus)
+        
+        for i in range(num_skus):
+            # Discretize order quantity
+            order_level = int(np.argmax(order_q_values[i::num_skus]))
+            best_orders[i] = order_level * self.order_level_size
+            
+            # Get lead time reduction
+            best_reductions[i] = np.argmax(lead_time_q_values[i::num_skus])
+        
+        return np.concatenate([best_orders, best_reductions])
     
-    def learn(self, state, action, reward, next_state, next_action=None):
+    def learn(self, state, action, reward, next_state):
         """
         Update Q-values using Q-learning (off-policy TD learning)
         """
@@ -68,8 +89,9 @@ class TDAgent:
         # Initialize total TD error
         total_td_error = 0
         
-        # Calculate TD error for each SKU
-        for i in range(len(action)):
+        # Calculate TD error for each action component (orders and lead time reductions)
+        num_actions = len(action)
+        for i in range(num_actions):
             # Q-learning update
             td_target = reward + self.discount_factor * np.max(next_q)
             td_error = td_target - current_q[i]
@@ -78,8 +100,8 @@ class TDAgent:
             current_q[i] += self.learning_rate * td_error
             total_td_error += td_error
         
-        # Average TD error across all SKUs
-        avg_td_error = total_td_error / len(action)
+        # Average TD error across all action components
+        avg_td_error = total_td_error / num_actions
         self.td_errors.append(avg_td_error)
         
         # Decay epsilon

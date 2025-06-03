@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 
 @dataclass
 class SKUData:
+    #Define the datatypes for the sku data
     sku: str
     description: str
     current_stock: int
@@ -59,7 +60,9 @@ class InventoryEnvironment(gym.Env):
             'retail_replenishment_time': 1,  # Days to replenish retail from warehouse
             'noise_std': 10,
             'min_decision_interval': 0.1,  # Minimum time between decisions (in days)
-            'current_time': 0.0  # Current simulation time in days (float)
+            'current_time': 0.0,  # Current simulation time in days (float)
+            'lead_time_reduction_cost': 50,  # Cost per day of lead time reduction
+            'max_lead_time_reduction': 3  # Maximum days by which lead time can be reduced
         } if config is None else config
 
         # Initialize inventory locations
@@ -183,16 +186,15 @@ class InventoryEnvironment(gym.Env):
         
         num_skus = len(self.skus)
         
-        # Simplified state space: only inventory levels
-        self.observation_space = spaces.Box(
-            low=0,
-            high=self.config['max_inventory'],
-            shape=(num_skus,),
+        # Action space: [order_quantities, lead_time_reductions]
+        self.action_space = spaces.Box(
+            low=np.array([0] * num_skus + [0] * num_skus),  # [order_qty, lead_time_reduction]
+            high=np.array([self.config['max_inventory']] * num_skus + [self.config['max_lead_time_reduction']] * num_skus),
             dtype=np.int32
         )
         
-        # Action space: order quantities for each SKU
-        self.action_space = spaces.Box(
+        # Simplified state space: only inventory levels
+        self.observation_space = spaces.Box(
             low=0,
             high=self.config['max_inventory'],
             shape=(num_skus,),
@@ -289,10 +291,11 @@ class InventoryEnvironment(gym.Env):
     def calculate_reward(self, sku_id: str, stockout: int, current_stock: int, 
                            daily_demand: float, current_lead_time: int, previous_lead_time: int) -> float:
         """
-        Calculate reward with stronger emphasis on service level:
-        1. Stockout penalty: -50 per unit stockout (increased from -10)
+        Calculate reward with stronger emphasis on service level and lead time reduction:
+        1. Stockout penalty: -50 per unit stockout
         2. Service level reward: +20 for fulfilling demand
         3. Inventory level penalties to maintain efficiency
+        4. Lead time reduction rewards
         """
         reward = 0.0
         sku = self.skus[sku_id]
@@ -315,7 +318,17 @@ class InventoryEnvironment(gym.Env):
         # Small reward for optimal inventory level
         if sku.safety_stock <= current_stock <= self.calculate_eoq(sku_id):
             reward += 5
+        
+        # Reward for lead time reduction
+        if current_lead_time < previous_lead_time:
+            # Reward proportional to the reduction achieved
+            lead_time_improvement = previous_lead_time - current_lead_time
+            reward += 10 * lead_time_improvement  # +10 points per day reduced
             
+            # Additional bonus for maintaining short lead times
+            if current_lead_time <= self.config['min_lead_time'] + 2:  # Within 2 days of minimum
+                reward += 15
+        
         return reward
 
     def _get_state(self):
@@ -344,6 +357,11 @@ class InventoryEnvironment(gym.Env):
         supplier_loads = defaultdict(float)
         stockouts = {}  # Initialize stockouts dictionary for all SKUs
         service_levels = {}  # Track service levels for all SKUs
+        
+        # Split action into order quantities and lead time reductions
+        num_skus = len(self.skus)
+        order_quantities = action[:num_skus]
+        lead_time_reductions = action[num_skus:]
         
         # Calculate time since last decision for each SKU
         current_time = self.config['current_time']
@@ -395,14 +413,14 @@ class InventoryEnvironment(gym.Env):
                 supplier_loads[sku.supplier] += sku.open_pos
                 self.skus[sku_id].open_pos = 0
             
-            # Process new orders
-            if action[i] > 0:
+            # Process new orders and lead time reductions
+            if order_quantities[i] > 0:
                 current_rop = self.calculate_rop(sku_id)
                 # Check if we're below reorder point AND have capacity for new orders
                 if sku.current_stock < current_rop and sku.current_stock < sku.max_stock:
                     best_supplier = self.select_best_supplier(sku_id)
                     
-                    base_order = max(action[i], sku.min_order_qty)
+                    base_order = max(order_quantities[i], sku.min_order_qty)
                     if period_demand > sku.base_demand * time_deltas[sku_id] * 1.5:
                         base_order *= 1.5
                     
@@ -414,6 +432,23 @@ class InventoryEnvironment(gym.Env):
                         self.skus[sku_id].supplier = best_supplier
                         self.skus[sku_id].open_pos += order_qty
                         supplier_loads[best_supplier] += order_qty
+                        
+                        # Apply lead time reduction if requested
+                        lead_time_reduction = int(lead_time_reductions[i])
+                        if lead_time_reduction > 0:
+                            # Calculate cost of lead time reduction
+                            reduction_cost = lead_time_reduction * self.config['lead_time_reduction_cost']
+                            # Apply reduction if supplier reliability is good enough
+                            supplier_reliability = self.suppliers[best_supplier]['reliability']
+                            if supplier_reliability >= 0.8:  # Only allow reduction for reliable suppliers
+                                original_lead_time = self.skus[sku_id].lead_time_days
+                                reduced_lead_time = max(
+                                    self.config['min_lead_time'],
+                                    original_lead_time - lead_time_reduction
+                                )
+                                self.skus[sku_id].lead_time_days = reduced_lead_time
+                                # Apply cost penalty for lead time reduction
+                                rewards[i] -= reduction_cost
                         
                         self._update_delivery_date(sku_id)
                         self.adjust_delivery_date(sku_id, period_demand)
@@ -443,11 +478,12 @@ class InventoryEnvironment(gym.Env):
             'retail_stock': {sku_id: sku.retail_stock for sku_id, sku in self.skus.items()},
             'open_pos': {sku_id: sku.open_pos for sku_id, sku in self.skus.items()},
             'stockouts': stockouts,
-            'service_levels': service_levels,  # Add service levels to info
+            'service_levels': service_levels,
             'supplier_loads': {supplier: info['current_load'] for supplier, info in self.suppliers.items()},
             'supplier_reliability': {supplier: info['reliability'] for supplier, info in self.suppliers.items()},
             'time_deltas': time_deltas,
-            'current_time': current_time
+            'current_time': current_time,
+            'lead_times': {sku_id: sku.lead_time_days for sku_id, sku in self.skus.items()}
         }
         
         # Advance simulation time by minimum decision interval
