@@ -181,6 +181,21 @@ def evaluate(env, agent, num_episodes=100):
         eval_metrics['episode_lengths'].append(int(episode_steps))
     
     return eval_metrics
+def plot_cumulative_reward(eval_metrics, save_dir):
+    """Plot the cumulative reward as a function of the number of steps."""
+    rewards = eval_metrics['rewards']
+    cumulative_rewards = np.cumsum(rewards)
+    steps = np.arange(1, len(cumulative_rewards) + 1)
+    plt.figure(figsize=(10, 6))
+    plt.plot(steps, cumulative_rewards, label='Cumulative Reward')
+    plt.xlabel('Episode')
+    plt.ylabel('Cumulative Reward')
+    plt.title('Cumulative Reward Over Episodes')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, 'cumulative_reward.png'))
+    plt.close()
+
 
 def main():
     # Create results directory
@@ -228,10 +243,15 @@ def main():
     
     print("\nEvaluating agent...")
     print("Running extended evaluation over multiple seasonal cycles...")
-    eval_metrics = evaluate(env, agent, num_episodes=500)  # Longer evaluation period
+    eval_metrics = evaluate(env, agent, num_episodes=2500)  # Longer evaluation period
+
+    # Plot the cumulative reward as a function of the number of steps
+    plot_cumulative_reward(eval_metrics, results_dir)
+
+    eval_rewards_by_type = evaluate_rewards_by_product_type(env, agent, num_episodes=2500)
 
     
-    
+
     # Save evaluation results
     with open(os.path.join(results_dir, 'evaluation_results.json'), 'w') as f:
         json.dump(convert_to_serializable(eval_metrics), f, indent=4)
@@ -293,18 +313,9 @@ def plot_seasonal_analysis(metrics_history, save_dir):
     plt.savefig(os.path.join(save_dir, 'seasonal_analysis.png'))
     plt.close()
 
-#Call the analyze_performance.py script to generate additional performance metrics
-def analyze_performance(metrics, save_dir):
-    """Analyze performance metrics and generate visualizations"""
-    # Create results directory
-    os.makedirs(save_dir, exist_ok=True)
     
-    # Plot 6-month analysis
-    # plot_six_month_analysis(metrics, save_dir)  # Removed because function is not defined
-    
-    # Save metrics to JSON
-    with open(os.path.join(save_dir, 'performance_metrics.json'), 'w') as f:
-        json.dump(convert_to_serializable(metrics), f, indent=4)
+
+
 
 def evaluate_rewards_by_product_type(env, agent, num_episodes=100):
     """
