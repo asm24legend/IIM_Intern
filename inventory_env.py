@@ -22,8 +22,8 @@ class SKUData:
     inventory_location: str
     supplier: str
     open_pos: int
-    last_order_date: datetime  # Changed from str to datetime
-    next_delivery_date: datetime  # Changed from str to datetime
+    last_order_date: datetime  
+    next_delivery_date: datetime  
     previous_demand: float = 0
     retail_stock: int = 0  # Stock at retail store
     # Add seasonal demand parameters
@@ -100,7 +100,7 @@ class InventoryEnvironment(gym.Env):
             'Type_A': SKUData(
                 sku='Type_A',
                 description='Product Type A',
-                current_stock=450,
+                current_stock=1000,
                 reorder_point=300,
                 safety_stock=200,
                 lead_time_days=7,
@@ -115,9 +115,9 @@ class InventoryEnvironment(gym.Env):
                 next_delivery_date=base_date + timedelta(days=7),
                 retail_stock=100,
                 base_demand=400,
-                amplitude=150,
-                frequency=2*np.pi/365,  # One year cycle
-                phase=0,
+                #amplitude=150,
+                #frequency=2*np.pi/365,  # One year cycle
+                #phase=0,
                 last_decision_time=0.0
             ),
             'Type_B': SKUData(
@@ -138,15 +138,15 @@ class InventoryEnvironment(gym.Env):
                 next_delivery_date=base_date + timedelta(days=10),
                 retail_stock=80,
                 base_demand=300,
-                amplitude=100,
-                frequency=2*np.pi/182.5,  # Six month cycle
-                phase=np.pi/2,
+                #amplitude=100,
+                #frequency=2*np.pi/182.5,  # Six month cycle
+                #phase=np.pi/2,
                 last_decision_time=0.0
             ),
             'Type_C': SKUData(
                 sku='Type_C',
                 description='Product Type C',
-                current_stock=250,
+                current_stock=500,
                 reorder_point=200,
                 safety_stock=100,
                 lead_time_days=5,
@@ -161,9 +161,9 @@ class InventoryEnvironment(gym.Env):
                 next_delivery_date=base_date + timedelta(days=5),
                 retail_stock=60,
                 base_demand=200,
-                amplitude=80,
-                frequency=2*np.pi/91.25,  # Three month cycle
-                phase=np.pi/4,
+                #amplitude=80,
+                #frequency=2*np.pi/91.25,  # Three month cycle
+                #phase=np.pi/4,
                 last_decision_time=0.0
             )
         }
@@ -173,7 +173,7 @@ class InventoryEnvironment(gym.Env):
             'Supplier_X': {
                 'lead_time_range': (5, 10),
                 'current_load': 0,
-                'reliability': 0.95,
+                'reliability': 0.70,
                 'products': ['Type_A', 'Type_B']
             },
             'Supplier_Y': {
@@ -203,21 +203,22 @@ class InventoryEnvironment(gym.Env):
         
         self.reset()
 
-    def generate_seasonal_demand(self, sku: SKUData, time_period: float) -> float:
-        """Generate seasonal demand using cosine function with noise for a specific time period"""
-        seasonal_component = sku.amplitude * np.cos(
-            sku.frequency * time_period + sku.phase
-        )
-        noise = np.random.normal(0, self.config['noise_std'])
-        demand = max(0, sku.base_demand + seasonal_component + noise)
-        return demand
+    #def generate_seasonal_demand(self, sku: SKUData, time_period: float) -> float:
+       # """Generate seasonal demand using cosine function with noise for a specific time period"""
+       # seasonal_component = sku.amplitude * np.cos(
+            #sku.frequency * time_period + sku.phase
+       # )
+       # noise = np.random.normal(0, self.config['noise_std'])
+        #demand = max(0, sku.base_demand + seasonal_component + noise)
+       # return demand
 
     def calculate_demand_for_period(self, sku: SKUData, start_time: float, end_time: float) -> float:
-        """Calculate total demand over a time period using numerical integration"""
-        num_points = max(10, int((end_time - start_time) * 24))  # At least 10 points, or one per hour
-        time_points = np.linspace(start_time, end_time, num_points)
-        demands = [self.generate_seasonal_demand(sku, t) for t in time_points]
-        return np.trapz(demands, time_points)  # Integrate demand over time
+     """Calculate total demand over a time period using average (non-seasonal) demand per SKU."""
+     days = max(1, end_time - start_time)
+     avg_daily_demand = sku.forecasted_demand / 365.0  # Assuming forecasted_demand is annual
+     noise = np.random.normal(0, self.config['noise_std'])
+     demand = max(0, avg_daily_demand * days + noise)
+     return demand
 
     def calculate_lead_time_demand(self, sku_id: str) -> float:
         """Calculate demand during lead time considering seasonality"""
@@ -225,11 +226,11 @@ class InventoryEnvironment(gym.Env):
         total_demand = 0
         current_time = self.config['current_time']
         
-        # Project demand over lead time period
-        for t in range(sku.lead_time_days):
-            self.config['current_time'] = current_time + t
-            daily_demand = self.generate_seasonal_demand(sku, current_time + t)
-            total_demand += daily_demand
+        # Project demand over lead time period excluding seasonal demand
+        #for t in range(sku.lead_time_days):
+           # self.config['current_time'] = current_time + t
+           # daily_demand = self.generate_seasonal_demand(sku, current_time + t)
+           # total_demand += daily_demand
         
         # Reset time step
         self.config['current_time'] = current_time
@@ -302,10 +303,10 @@ class InventoryEnvironment(gym.Env):
         
         # Major penalty for stockouts
         if stockout > 0:
-            reward -= 50 * stockout
+            reward -= 40 * stockout
         else:
             # Reward for fulfilling demand
-            reward += 20
+            reward += 100
         
         # Inventory level penalties
         if current_stock > self.calculate_eoq(sku_id):
@@ -317,7 +318,7 @@ class InventoryEnvironment(gym.Env):
         
         # Small reward for optimal inventory level
         if sku.safety_stock <= current_stock <= self.calculate_eoq(sku_id):
-            reward += 5
+            reward += 50
         
         # Reward for lead time reduction
         if current_lead_time < previous_lead_time:
@@ -400,10 +401,11 @@ class InventoryEnvironment(gym.Env):
             
             # Update retail stock
             sku.retail_stock -= fulfilled_retail_demand
-            
-            # Replenish retail from warehouse if needed
-            if sku.retail_stock < sku.safety_stock:
-                replenished = self._replenish_retail(sku_id, sku.safety_stock - sku.retail_stock)
+
+            # Always attempt to replenish retail from warehouse up to safety stock
+            replenishment_needed = max(0, sku.safety_stock - sku.retail_stock)
+            if replenishment_needed > 0:
+             replenished = self._replenish_retail(sku_id, replenishment_needed)
             
             # Process warehouse level operations
             if sku.open_pos > 0 and self._is_delivery_due(sku, current_time):

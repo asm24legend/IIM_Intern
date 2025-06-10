@@ -56,7 +56,7 @@ def plot_training_progress(rewards, td_errors, metrics, save_dir):
     plt.savefig(os.path.join(save_dir, 'training_progress.png'))
     plt.close()
 
-def train(env, agent, num_episodes=1000):
+def train(env, agent, num_episodes=100):
     """Train the agent"""
     rewards_history = []
     td_errors = []
@@ -198,7 +198,7 @@ def main():
     )
     
     # Training parameters
-    num_episodes = 15000
+    num_episodes = 2000
     eval_interval = 100
     
     print("Starting training...")
@@ -229,6 +229,8 @@ def main():
     print("\nEvaluating agent...")
     print("Running extended evaluation over multiple seasonal cycles...")
     eval_metrics = evaluate(env, agent, num_episodes=500)  # Longer evaluation period
+
+    
     
     # Save evaluation results
     with open(os.path.join(results_dir, 'evaluation_results.json'), 'w') as f:
@@ -261,6 +263,7 @@ def plot_seasonal_analysis(metrics_history, save_dir):
     ax1.set_ylabel('Stock Level')
     ax1.legend()
     
+    
     # Plot retail stock levels for each SKU type
     for sku_type in ['Type_A', 'Type_B', 'Type_C']:
         retail_levels = [m['retail_levels'][sku_type][-1] for m in metrics_history]
@@ -290,6 +293,45 @@ def plot_seasonal_analysis(metrics_history, save_dir):
     plt.savefig(os.path.join(save_dir, 'seasonal_analysis.png'))
     plt.close()
 
+#Call the analyze_performance.py script to generate additional performance metrics
+def analyze_performance(metrics, save_dir):
+    """Analyze performance metrics and generate visualizations"""
+    # Create results directory
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Plot 6-month analysis
+    # plot_six_month_analysis(metrics, save_dir)  # Removed because function is not defined
+    
+    # Save metrics to JSON
+    with open(os.path.join(save_dir, 'performance_metrics.json'), 'w') as f:
+        json.dump(convert_to_serializable(metrics), f, indent=4)
+
+def evaluate_rewards_by_product_type(env, agent, num_episodes=100):
+    """
+    Evaluate and aggregate rewards per product type (A, B, C) for each episode.
+    Assumes env.step()'s info dict contains 'sku_rewards' as {sku_type: reward}.
+    Returns a dict: { 'Type_A': [...], 'Type_B': [...], 'Type_C': [...] }
+    """
+    rewards_by_type = {'Type_A': [], 'Type_B': [], 'Type_C': []}
+
+    for episode in range(num_episodes):
+        state = env.reset()
+        done = False
+        episode_rewards = {'Type_A': 0.0, 'Type_B': 0.0, 'Type_C': 0.0}
+
+        while not done:
+            action = agent.get_action(state, env)
+            next_state, reward, done, info = env.step(action)
+            # Aggregate rewards per SKU type
+            sku_rewards = info.get('sku_rewards', {})
+            for sku_type in ['Type_A', 'Type_B', 'Type_C']:
+                episode_rewards[sku_type] += float(sku_rewards.get(sku_type, 0.0))
+            state = next_state
+
+        for sku_type in ['Type_A', 'Type_B', 'Type_C']:
+            rewards_by_type[sku_type].append(episode_rewards[sku_type])
+
+    return rewards_by_type
 if __name__ == "__main__":
     # Set random seed for reproducibility
     np.random.seed(42)

@@ -19,7 +19,7 @@ class TDAgent:
         self.epsilon_min = 0.01
         self.epsilon_decay = 0.997
         
-        # Initialize Q-table
+        # Initialize Q-table 
         self.q_table = defaultdict(lambda: np.zeros(self.action_space.shape[0]))
         
         # TD error history for monitoring learning

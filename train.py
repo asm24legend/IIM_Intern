@@ -5,53 +5,68 @@ from q_learning_agent import TDAgent
 import json
 from datetime import datetime
 import os
-
-def plot_metrics(rewards, td_errors, stockouts, service_levels, filename_prefix):
-    """Plot and save training metrics"""
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+def plot_metrics(episode_rewards, td_errors, stockouts, service_levels, filename):
+    """
+    Plot and save training metrics.
     
-    # Plot episode rewards
-    ax1.plot(rewards)
-    ax1.set_title('Episode Rewards')
-    ax1.set_xlabel('Episode')
-    ax1.set_ylabel('Total Reward')
+    Args:
+        episode_rewards: List of rewards per episode
+        td_errors: List of TD errors per episode
+        stockouts: List of stockouts per episode
+        service_levels: List of service levels per episode
+        filename: Base filename to save plots
+    """
+    plt.figure(figsize=(12, 8))
     
-    # Plot TD errors
-    ax2.plot(td_errors)
-    ax2.set_title('TD Errors')
-    ax2.set_xlabel('Episode')
-    ax2.set_ylabel('Average TD Error')
+    plt.subplot(2, 2, 1)
+    plt.plot(episode_rewards, label='Episode Rewards')
+    plt.xlabel('Episode')
+    plt.ylabel('Reward')
+    plt.title('Episode Rewards')
+    plt.legend()
     
-    # Plot stockouts
-    ax3.plot(stockouts)
-    ax3.set_title('Stockouts per Episode')
-    ax3.set_xlabel('Episode')
-    ax3.set_ylabel('Number of Stockouts')
+    plt.subplot(2, 2, 2)
+    plt.plot(td_errors, label='TD Errors', color='orange')
+    plt.xlabel('Episode')
+    plt.ylabel('TD Error')
+    plt.title('TD Errors')
+    plt.legend()
     
-    # Plot service levels
-    ax4.plot(service_levels)
-    ax4.set_title('Service Level')
-    ax4.set_xlabel('Episode')
-    ax4.set_ylabel('Service Level (%)')
+    plt.subplot(2, 2, 3)
+    plt.plot(stockouts, label='Stockouts', color='red')
+    plt.xlabel('Episode')
+    plt.ylabel('Stockouts')
+    plt.title('Stockouts')
+    plt.legend()
+    
+    plt.subplot(2, 2, 4)
+    plt.plot(service_levels, label='Service Levels', color='green')
+    plt.xlabel('Episode')
+    plt.ylabel('Service Level (%)')
+    plt.title('Service Levels')
+    plt.legend()
     
     plt.tight_layout()
-    plt.savefig(f'{filename_prefix}_training_metrics.png')
+    plt.savefig(f'{filename}_metrics.png')
     plt.close()
-
-def save_metrics(metrics, filename_prefix):
-    """Save training metrics to JSON file"""
-    with open(f'{filename_prefix}_metrics.json', 'w') as f:
+def save_metrics(metrics, filename):
+    """
+    Save training metrics to a JSON file.
+    
+    Args:
+        metrics: Dictionary containing training metrics
+        filename: Base filename to save metrics
+    """
+    with open(f'{filename}_metrics.json', 'w') as f:
         json.dump(metrics, f, indent=4)
-
 def train(num_episodes=1000, eval_interval=50):
     # Initialize environment and agent
     env = InventoryEnvironment()
     agent = TDAgent(
         action_space=env.action_space,
-        learning_rate=0.1,
-        discount_factor=0.95,
-        epsilon=1.0,
-        lambda_trace=0.9
+        learning_rate=0.05,
+        discount_factor=0.99,
+        epsilon=1.0
     )
     
     # Initialize metrics tracking
@@ -86,20 +101,13 @@ def train(num_episodes=1000, eval_interval=50):
             # Take action in environment
             next_state, reward, done, info = env.step(action)
             
-            # Get next action for SARSA update (only in early phase)
-            if episode < agent.policy_switch_episode and not done:
-                next_action = agent.get_action(next_state, env)
-            else:
-                next_action = None
-            
-            # Update agent
-            td_error = agent.learn(state, action, reward, next_state, next_action)
+            # Q-learning update (no next_action needed)
+            td_error = agent.learn(state, action, reward, next_state)
             
             # Update metrics
             episode_reward += reward
             episode_stockouts += sum(info['stockouts'].values())
             
-            # Track demand fulfillment for service level
             for sku_id in env.skus:
                 demand = info['stockouts'][sku_id]
                 fulfilled = max(0, demand - info['stockouts'][sku_id])
@@ -107,9 +115,6 @@ def train(num_episodes=1000, eval_interval=50):
                 fulfilled_demand += fulfilled
             
             state = next_state
-        
-        # Reset eligibility traces at end of episode
-        agent.reset_traces()
         
         # Calculate service level
         service_level = (fulfilled_demand / total_demand * 100) if total_demand > 0 else 100
@@ -119,14 +124,8 @@ def train(num_episodes=1000, eval_interval=50):
         metrics['td_errors'].append(agent.get_average_td_error())
         metrics['stockouts'].append(episode_stockouts)
         metrics['service_levels'].append(service_level)
-        
-        # Track inventory levels and supplier metrics
-        metrics['warehouse_stock_levels'].append(
-            {sku_id: level for sku_id, level in info['warehouse_stock'].items()}
-        )
-        metrics['retail_stock_levels'].append(
-            {sku_id: level for sku_id, level in info['retail_stock'].items()}
-        )
+        metrics['warehouse_stock_levels'].append({sku_id: level for sku_id, level in info['warehouse_stock'].items()})
+        metrics['retail_stock_levels'].append({sku_id: level for sku_id, level in info['retail_stock'].items()})
         metrics['supplier_reliability'].append(info['supplier_reliability'])
         
         # Print progress
@@ -139,7 +138,6 @@ def train(num_episodes=1000, eval_interval=50):
             print(f"Current Epsilon: {agent.epsilon:.3f}")
             print("---")
             
-            # Save intermediate results
             plot_metrics(
                 metrics['episode_rewards'],
                 metrics['td_errors'],
@@ -151,7 +149,6 @@ def train(num_episodes=1000, eval_interval=50):
     
     print("Training completed!")
     
-    # Save final results
     plot_metrics(
         metrics['episode_rewards'],
         metrics['td_errors'],
@@ -164,13 +161,10 @@ def train(num_episodes=1000, eval_interval=50):
     return agent, metrics
 
 if __name__ == "__main__":
-    # Set random seed for reproducibility
     np.random.seed(42)
-    
-    # Train agent
     agent, metrics = train(num_episodes=1000)
     
     print("\nFinal Performance Metrics:")
-    print(f"Average Reward (last 100 episodes): {np.mean(metrics['episode_rewards'][-100:]):.2f}")
-    print(f"Average Service Level (last 100 episodes): {np.mean(metrics['service_levels'][-100:]):.2f}%")
-    print(f"Average Stockouts (last 100 episodes): {np.mean(metrics['stockouts'][-100:]):.2f}") 
+    print(f"Average Reward (last 1000 episodes): {np.mean(metrics['episode_rewards'][-1000:]):.2f}")
+    print(f"Average Service Level (last 1000 episodes): {np.mean(metrics['service_levels'][-1000:]):.2f}%")
+    print(f"Average Stockouts (last 1000 episodes): {np.mean(metrics['stockouts'][-1000:]):.2f}")
