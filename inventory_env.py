@@ -173,7 +173,7 @@ class InventoryEnvironment(gym.Env):
             'Supplier_X': {
                 'lead_time_range': (5, 10),
                 'current_load': 0,
-                'reliability': 0.70,
+                'reliability': 0.95,
                 'products': ['Type_A', 'Type_B']
             },
             'Supplier_Y': {
@@ -234,7 +234,7 @@ class InventoryEnvironment(gym.Env):
         
         # Reset time step
         self.config['current_time'] = current_time
-        return total_demand * 1.2  # Add 20% safety factor
+        return total_demand * 1.40  # Add 20% safety factor
 
     def calculate_eoq(self, sku_id: str) -> int:
         """Calculate Economic Order Quantity for a specific SKU"""
@@ -251,7 +251,7 @@ class InventoryEnvironment(gym.Env):
         
         # Adjust ROP if lead time demand exceeds forecasted demand
         if lead_time_demand > sku.forecasted_demand:
-            safety_stock_adjustment = int(0.2 * lead_time_demand)  # Increase safety stock by 20%
+            safety_stock_adjustment = int(0.2* lead_time_demand)  # Increase safety stock by 20%
             return int(lead_time_demand + safety_stock_adjustment)
         
         return int(lead_time_demand + sku.safety_stock)
@@ -278,12 +278,12 @@ class InventoryEnvironment(gym.Env):
         if sku.open_pos > 0:
             demand_change = current_demand - sku.previous_demand
             
-            if demand_change > 100:  # Significant increase in demand
+            if demand_change > sku.eoq:  # Significant increase in demand
                 # Advance delivery date
                 current_date = sku.next_delivery_date
                 new_date = current_date - timedelta(days=2)
                 self.skus[sku_id].next_delivery_date = new_date
-            elif demand_change < -50:  # Significant decrease in demand
+            elif demand_change < -sku.eoq:  # Significant decrease in demand
                 # Delay delivery date
                 current_date = sku.next_delivery_date
                 new_date = current_date + timedelta(days=2)
@@ -363,6 +363,18 @@ class InventoryEnvironment(gym.Env):
         num_skus = len(self.skus)
         order_quantities = action[:num_skus]
         lead_time_reductions = action[num_skus:]
+
+        num_skus = len(self.skus)
+        
+        # Action space: [order_quantities] only (no lead time reductions)
+        self.action_space = spaces.Box(
+            low=np.array([0] * num_skus),  # Only order quantities
+            high=np.array([self.config['max_inventory']] * num_skus),
+            dtype=np.int32
+        )
+
+        order_quantities = action[:num_skus]
+
         
         # Calculate time since last decision for each SKU
         current_time = self.config['current_time']
@@ -436,11 +448,14 @@ class InventoryEnvironment(gym.Env):
                         supplier_loads[best_supplier] += order_qty
                         
                         # Apply lead time reduction if requested
+                        # Calculate lead time reduction separately from order quantities
+                        lead_time_reduction = action[num_skus + i] if len(action) > num_skus + i else 0
+                        
                         lead_time_reduction = int(lead_time_reductions[i])
                         if lead_time_reduction > 0:
-                            # Calculate cost of lead time reduction
+                            #Calculate cost of lead time reduction
                             reduction_cost = lead_time_reduction * self.config['lead_time_reduction_cost']
-                            # Apply reduction if supplier reliability is good enough
+                            #Apply reduction if supplier reliability is good enough
                             supplier_reliability = self.suppliers[best_supplier]['reliability']
                             if supplier_reliability >= 0.8:  # Only allow reduction for reliable suppliers
                                 original_lead_time = self.skus[sku_id].lead_time_days
@@ -449,7 +464,7 @@ class InventoryEnvironment(gym.Env):
                                     original_lead_time - lead_time_reduction
                                 )
                                 self.skus[sku_id].lead_time_days = reduced_lead_time
-                                # Apply cost penalty for lead time reduction
+                                #Apply cost penalty for lead time reduction
                                 rewards[i] -= reduction_cost
                         
                         self._update_delivery_date(sku_id)

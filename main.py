@@ -196,7 +196,25 @@ def plot_cumulative_reward(eval_metrics, save_dir):
     plt.savefig(os.path.join(save_dir, 'cumulative_reward.png'))
     plt.close()
 
+def export_q_table_to_csv(q_table_path, csv_path):
+    """
+    Load a Q-table from a .npy file and export it to a readable CSV file.
+    """
+    import csv
 
+    q_table = np.load(q_table_path, allow_pickle=True).item()
+    with open(csv_path, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(['State', 'Action', 'Q-value'])
+        for key, value in q_table.items():
+            # key is usually a tuple: (state, action)
+            if isinstance(key, (tuple, list)) and len(key) == 2:
+                state, action = key
+            else:
+                state, action = key, ""
+            writer.writerow([str(state), str(action), value])
+
+   
 def main():
     # Create results directory
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -209,11 +227,11 @@ def main():
         action_space=env.action_space,
         learning_rate=0.05,
         discount_factor=0.99,
-        epsilon=1.0
+        epsilon=0.
     )
     
     # Training parameters
-    num_episodes = 2000
+    num_episodes = 1000
     eval_interval = 100
     
     print("Starting training...")
@@ -249,6 +267,15 @@ def main():
     plot_cumulative_reward(eval_metrics, results_dir)
 
     eval_rewards_by_type = evaluate_rewards_by_product_type(env, agent, num_episodes=2500)
+
+    # Save trained agent
+    agent.save(os.path.join(results_dir, 'trained_agent.npy'))
+
+    # Export Q-table to CSV
+    q_table_path = os.path.join(results_dir, 'trained_agent.npy')
+    csv_path = os.path.join(results_dir, 'q_table.csv')
+    export_q_table_to_csv(q_table_path, csv_path)
+    print(f"Q-table exported to {csv_path}")
 
     
 
@@ -313,9 +340,7 @@ def plot_seasonal_analysis(metrics_history, save_dir):
     plt.savefig(os.path.join(save_dir, 'seasonal_analysis.png'))
     plt.close()
 
-    
-
-
+#Display the Q-values for each SKU type
 
 def evaluate_rewards_by_product_type(env, agent, num_episodes=100):
     """
@@ -343,6 +368,7 @@ def evaluate_rewards_by_product_type(env, agent, num_episodes=100):
             rewards_by_type[sku_type].append(episode_rewards[sku_type])
 
     return rewards_by_type
+
 if __name__ == "__main__":
     # Set random seed for reproducibility
     np.random.seed(42)

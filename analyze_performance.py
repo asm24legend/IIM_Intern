@@ -176,6 +176,7 @@ def plot_six_month_analysis(metrics, save_dir):
                 bbox_inches='tight', dpi=300)
     plt.close()
 
+
 def main():
     # Find most recent results directory
     results_dirs = [d for d in os.listdir('.') if d.startswith('results_')]
@@ -232,6 +233,8 @@ def main():
         print(f"\n{sku_type} Average Inventory Levels:")
         print(f"  Warehouse: {avg_warehouse:.1f} units")
         print(f"  Retail: {avg_retail:.1f} units")
+
+        
 
 if __name__ == "__main__":
     main() 
