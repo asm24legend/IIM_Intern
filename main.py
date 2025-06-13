@@ -6,6 +6,7 @@ from tqdm import tqdm
 import json
 import os
 from datetime import datetime
+import pickle
 
 def convert_to_serializable(obj):
     """Convert numpy types to native Python types for JSON serialization"""
@@ -45,21 +46,32 @@ def plot_training_progress(rewards, td_errors, metrics, save_dir):
     ax3.set_xlabel('Episode')
     ax3.set_ylabel('Service Level (%)')
     
-    # Plot stockouts by location
+    # Plot stockouts by location and total stockout percentage
     locations = ['Location_1', 'Location_2', 'Location_3', 'Retail']
     for location in locations:
         stockouts = [m['location_stockouts'][location] for m in metrics]
         ax4.plot(stockouts, label=location)
-    ax4.set_title('Stockouts per Location')
+    
+    # Add stockout percentage line
+    stockout_percentages = [m['stockout_percentage'] for m in metrics]
+    ax4_twin = ax4.twinx()
+    ax4_twin.plot(stockout_percentages, 'k--', label='Stockout %')
+    ax4_twin.set_ylabel('Stockout Percentage (%)')
+    
+    ax4.set_title('Stockouts per Location and Overall Percentage')
     ax4.set_xlabel('Episode')
     ax4.set_ylabel('Number of Stockouts')
-    ax4.legend()
+    
+    # Combine legends
+    lines1, labels1 = ax4.get_legend_handles_labels()
+    lines2, labels2 = ax4_twin.get_legend_handles_labels()
+    ax4.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
     
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, 'training_progress.png'))
     plt.close()
 
-def train(env, agent, num_episodes=100):
+def train(env, agent, num_episodes=10000):
     """Train the agent"""
     rewards_history = []
     td_errors = []
@@ -82,6 +94,8 @@ def train(env, agent, num_episodes=100):
                 'Location_3': 0,
                 'Retail': 0
             },
+            'total_demand': 0,  # Track total demand
+            'total_stockouts': 0,  # Track total stockouts
             'service_level': 0,
             'warehouse_levels': {},
             'retail_levels': {},
@@ -107,9 +121,14 @@ def train(env, agent, num_episodes=100):
                 sku = env.skus[sku_id]
                 location = sku.inventory_location
                 episode_metrics['location_stockouts'][location] += stockout
+                episode_metrics['total_stockouts'] += stockout
                 # Track retail stockouts separately
                 if sku.retail_stock <= 0:
                     episode_metrics['location_stockouts']['Retail'] += stockout
+            
+            # Track total demand
+            for sku_id, sku in env.skus.items():
+                episode_metrics['total_demand'] += sku.total_demand
             
             # Track inventory levels
             for sku_id in env.skus:
@@ -137,13 +156,19 @@ def train(env, agent, num_episodes=100):
             service_level * 100 for service_level in info['service_levels'].values()
         ]))
         
+        # Calculate stockout percentage based on actual demand and stockouts
+        if episode_metrics['total_demand'] > 0:
+            episode_metrics['stockout_percentage'] = (episode_metrics['total_stockouts'] / episode_metrics['total_demand']) * 100
+        else:
+            episode_metrics['stockout_percentage'] = 0.0
+        
         # Store episode results
         rewards_history.append(float(episode_reward))
         td_errors.append(float(agent.get_average_td_error()))
         metrics_history.append(episode_metrics)
         episode_lengths.append(int(episode_steps))
         
-        # Update progress bar with location-specific stockouts
+        # Update progress bar with location-specific stockouts and percentages
         if (episode + 1) % 10 == 0:
             avg_reward = float(np.mean(rewards_history[-10:]))
             avg_service_level = float(np.mean([
@@ -154,9 +179,15 @@ def train(env, agent, num_episodes=100):
                 location: np.mean([m['location_stockouts'][location] for m in metrics_history[-10:]])
                 for location in ['Location_1', 'Location_2', 'Location_3', 'Retail']
             }
+            # Calculate average stockout percentage
+            total_stockouts = sum(m['total_stockouts'] for m in metrics_history[-10:])
+            total_demand = sum(m['total_demand'] for m in metrics_history[-10:])
+            avg_stockout_percentage = (total_stockouts / total_demand * 100) if total_demand > 0 else 0.0
+            
             pbar.set_postfix({
                 'Reward': f'{avg_reward:.2f}',
                 'Service Level': f'{avg_service_level:.1f}%',
+                'Stockout %': f'{avg_stockout_percentage:.1f}%',
                 'L1 Stockouts': f'{avg_stockouts["Location_1"]:.1f}',
                 'L2 Stockouts': f'{avg_stockouts["Location_2"]:.1f}',
                 'L3 Stockouts': f'{avg_stockouts["Location_3"]:.1f}',
@@ -176,6 +207,9 @@ def evaluate(env, agent, num_episodes=100):
             'Location_3': [],
             'Retail': []
         },
+        'total_stockouts': [],
+        'total_demand': [],
+        'stockout_percentages': [],
         'episode_lengths': []
     }
     
@@ -190,6 +224,8 @@ def evaluate(env, agent, num_episodes=100):
             'Location_3': 0,
             'Retail': 0
         }
+        total_stockouts = 0
+        total_demand = 0
         
         while not done:
             action = agent.get_action(state, env)
@@ -203,9 +239,14 @@ def evaluate(env, agent, num_episodes=100):
                 sku = env.skus[sku_id]
                 location = sku.inventory_location
                 episode_stockouts[location] += stockout
+                total_stockouts += stockout
                 # Track retail stockouts separately
                 if sku.retail_stock <= 0:
                     episode_stockouts['Retail'] += stockout
+            
+            # Track total demand
+            for sku_id, sku in env.skus.items():
+                total_demand += sku.total_demand
             
             state = next_state
         
@@ -214,11 +255,17 @@ def evaluate(env, agent, num_episodes=100):
             service_level * 100 for service_level in info['service_levels'].values()
         ]))
         
+        # Calculate stockout percentage based on actual demand and stockouts
+        stockout_percentage = (total_stockouts / total_demand * 100) if total_demand > 0 else 0.0
+        
         # Store episode results
         eval_metrics['rewards'].append(float(episode_reward))
         eval_metrics['service_levels'].append(float(service_level))
         for location in episode_stockouts:
             eval_metrics['location_stockouts'][location].append(episode_stockouts[location])
+        eval_metrics['total_stockouts'].append(total_stockouts)
+        eval_metrics['total_demand'].append(total_demand)
+        eval_metrics['stockout_percentages'].append(stockout_percentage)
         eval_metrics['episode_lengths'].append(int(episode_steps))
     
     return eval_metrics
@@ -242,15 +289,30 @@ def plot_location_stockouts(eval_metrics, save_dir):
     """Plot stockouts by location"""
     plt.figure(figsize=(12, 6))
     
+    # Create two y-axes
+    ax1 = plt.gca()
+    ax2 = ax1.twinx()
+    
+    # Plot stockouts by location
     locations = ['Location_1', 'Location_2', 'Location_3', 'Retail']
     for location in locations:
         stockouts = eval_metrics['location_stockouts'][location]
-        plt.plot(stockouts, label=location)
+        ax1.plot(stockouts, label=location)
     
-    plt.xlabel('Episode')
-    plt.ylabel('Number of Stockouts')
-    plt.title('Stockouts by Location')
-    plt.legend()
+    # Plot stockout percentage
+    ax2.plot(eval_metrics['stockout_percentages'], 'k--', label='Stockout %')
+    
+    # Set labels and title
+    ax1.set_xlabel('Episode')
+    ax1.set_ylabel('Number of Stockouts')
+    ax2.set_ylabel('Stockout Percentage (%)')
+    plt.title('Stockouts by Location and Overall Percentage')
+    
+    # Combine legends
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
+    
     plt.grid(True)
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, 'location_stockouts.png'))
@@ -274,65 +336,76 @@ def export_q_table_to_csv(q_table_path, csv_path):
                 state, action = key, ""
             writer.writerow([str(state), str(action), value])
 
+def print_training_summary(rewards_history, metrics_history, episode_lengths, td_errors):
+    """Print summary of training results"""
+    # Calculate total demand and stockouts
+    total_demand = sum(m['total_demand'] for m in metrics_history)
+    total_stockouts = sum(m['total_stockouts'] for m in metrics_history)
+    stockout_percentage = (total_stockouts / total_demand) * 100
+    
+    # Calculate episode statistics
+    avg_episode_length = np.mean(episode_lengths)
+    avg_stockouts_per_episode = total_stockouts / len(metrics_history)
+    
+    print("\nEpisode Information:")
+    print(f"Number of Episodes: {len(metrics_history)}")
+    print(f"Average Episode Length: {avg_episode_length:.1f} days")
+    print(f"Average Stockouts per Episode: {avg_stockouts_per_episode:.2f}")
+    print("\nNote: Each episode represents a complete inventory cycle, starting from initial stock levels")
+    print("and continuing until either a terminal condition is met (e.g., retail stockout) or")
+    print("the maximum episode length is reached. Each step within an episode represents one day.")
+    
+    print("\nOverall Metrics:")
+    print(f"Average Reward: {np.mean(rewards_history):.2f}")
+    print(f"Average Service Level: {np.mean([m['service_level'] for m in metrics_history]):.1f}%")
+    print(f"Stockout Percentage: {stockout_percentage:.5f}%")
+    print(f"Total Demand: {total_demand:.0f}")
+    print(f"Total Stockouts: {total_stockouts:.0f}")
+
+
 def main():
-    # Create results directory
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    results_dir = f'results_{timestamp}'
+    # Create results directory with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_dir = f"results_{timestamp}"
     os.makedirs(results_dir, exist_ok=True)
     
     # Initialize environment and agent
     env = InventoryEnvironment()
-    agent = TDAgent(
-        action_space=env.action_space,
-        discount_factor=0.99
-    )
+    agent = TDAgent(env.action_space)
     
-    # Training parameters
-    num_episodes = 1000
-    eval_interval = 100
+    # Train the agent
+    print("\nStarting Training...")
+    rewards_history, metrics_history, episode_lengths, td_errors = train(env, agent)
     
-    print("Starting training...")
-    print(f"Training will run for {num_episodes} episodes")
+    # Print training summary
+    print_training_summary(rewards_history, metrics_history, episode_lengths, td_errors)
     
-    rewards_history, metrics_history, episode_lengths, td_errors = train(
-        env, 
-        agent,
-        num_episodes=num_episodes
-    )
+    # Evaluate the trained agent
+    print("\nStarting Evaluation...")
+    eval_metrics = evaluate(env, agent)
+    
     
     # Plot training progress
     plot_training_progress(rewards_history, td_errors, metrics_history, results_dir)
     
-    # Evaluate the trained agent
-    print("\nEvaluating trained agent...")
-    eval_metrics = evaluate(env, agent, num_episodes=100)
-    
     # Plot evaluation results
-    plot_cumulative_reward(eval_metrics, results_dir)
     plot_location_stockouts(eval_metrics, results_dir)
     
-    # Save evaluation metrics
-    eval_metrics_serializable = convert_to_serializable(eval_metrics)
-    with open(os.path.join(results_dir, 'evaluation_metrics.json'), 'w') as f:
-        json.dump(eval_metrics_serializable, f, indent=4)
+    # Save results
+    results = {
+        'training': {
+            'rewards': rewards_history,
+            'metrics': metrics_history,
+            'episode_lengths': episode_lengths,
+            'td_errors': td_errors
+        },
+        'evaluation': eval_metrics
+    }
     
-    print(f"\nResults saved in {results_dir}")
-    print("\nEvaluation Results:")
-    print(f"Average Reward: {np.mean(eval_metrics['rewards']):.2f}")
-    print(f"Average Service Level: {np.mean(eval_metrics['service_levels']):.1f}%")
-    print("\nAverage Stockouts by Location:")
-    for location in ['Location_1', 'Location_2', 'Location_3', 'Retail']:
-        avg_stockouts = np.mean(eval_metrics['location_stockouts'][location])
-        print(f"{location}: {avg_stockouts:.2f}")
-
-    # Save trained agent
-    agent.save(os.path.join(results_dir, 'trained_agent.npy'))
-
-    # Export Q-table to CSV
-    q_table_path = os.path.join(results_dir, 'trained_agent.npy')
-    csv_path = os.path.join(results_dir, 'q_table.csv')
-    export_q_table_to_csv(q_table_path, csv_path)
-    print(f"Q-table exported to {csv_path}")
+    with open(os.path.join(results_dir, 'results.pkl'), 'wb') as f:
+        pickle.dump(results, f)
+    
+    print(f"\nResults saved to {results_dir}")
 
 if __name__ == "__main__":
     # Set random seed for reproducibility
