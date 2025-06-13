@@ -45,12 +45,15 @@ def plot_training_progress(rewards, td_errors, metrics, save_dir):
     ax3.set_xlabel('Episode')
     ax3.set_ylabel('Service Level (%)')
     
-    # Plot stockouts
-    stockouts = [sum(m['stockouts'].values()) for m in metrics]
-    ax4.plot(stockouts)
-    ax4.set_title('Stockouts per Episode')
+    # Plot stockouts by location
+    locations = ['Location_1', 'Location_2', 'Location_3', 'Retail']
+    for location in locations:
+        stockouts = [m['location_stockouts'][location] for m in metrics]
+        ax4.plot(stockouts, label=location)
+    ax4.set_title('Stockouts per Location')
     ax4.set_xlabel('Episode')
     ax4.set_ylabel('Number of Stockouts')
+    ax4.legend()
     
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, 'training_progress.png'))
@@ -73,6 +76,12 @@ def train(env, agent, num_episodes=100):
         episode_steps = 0
         episode_metrics = {
             'stockouts': {},
+            'location_stockouts': {
+                'Location_1': 0,
+                'Location_2': 0,
+                'Location_3': 0,
+                'Retail': 0
+            },
             'service_level': 0,
             'warehouse_levels': {},
             'retail_levels': {},
@@ -93,9 +102,14 @@ def train(env, agent, num_episodes=100):
             episode_reward += reward
             episode_steps += 1
             
-            # Track stockouts and service level (now SKU-specific)
-            for sku_id in env.skus:
-                episode_metrics['stockouts'][sku_id] = info['stockouts'][sku_id]
+            # Track stockouts by location
+            for sku_id, stockout in info['stockouts'].items():
+                sku = env.skus[sku_id]
+                location = sku.inventory_location
+                episode_metrics['location_stockouts'][location] += stockout
+                # Track retail stockouts separately
+                if sku.retail_stock <= 0:
+                    episode_metrics['location_stockouts']['Retail'] += stockout
             
             # Track inventory levels
             for sku_id in env.skus:
@@ -105,15 +119,15 @@ def train(env, agent, num_episodes=100):
                     episode_metrics['retail_levels'][sku_id] = []
                 
                 episode_metrics['warehouse_levels'][sku_id].append(
-                    int(info['warehouse_stock'][sku_id])  # Convert to native int
+                    int(info['warehouse_stock'][sku_id])
                 )
                 episode_metrics['retail_levels'][sku_id].append(
-                    int(info['retail_stock'][sku_id])  # Convert to native int
+                    int(info['retail_stock'][sku_id])
                 )
             
             # Track supplier reliability
             episode_metrics['supplier_reliability'] = {
-                k: float(v) for k, v in info['supplier_reliability'].items()  # Convert to native float
+                k: float(v) for k, v in info['supplier_reliability'].items()
             }
             
             state = next_state
@@ -123,24 +137,30 @@ def train(env, agent, num_episodes=100):
             service_level * 100 for service_level in info['service_levels'].values()
         ]))
         
-        # Store episode results (convert to native types)
+        # Store episode results
         rewards_history.append(float(episode_reward))
         td_errors.append(float(agent.get_average_td_error()))
         metrics_history.append(episode_metrics)
         episode_lengths.append(int(episode_steps))
         
-        # Update progress bar
+        # Update progress bar with location-specific stockouts
         if (episode + 1) % 10 == 0:
             avg_reward = float(np.mean(rewards_history[-10:]))
             avg_service_level = float(np.mean([
                 m['service_level'] for m in metrics_history[-10:]
             ]))
-            # Calculate average total stockouts for progress bar
-            avg_total_stockouts = np.mean([sum(m['stockouts'].values()) for m in metrics_history[-10:]])
+            # Calculate average stockouts by location
+            avg_stockouts = {
+                location: np.mean([m['location_stockouts'][location] for m in metrics_history[-10:]])
+                for location in ['Location_1', 'Location_2', 'Location_3', 'Retail']
+            }
             pbar.set_postfix({
                 'Reward': f'{avg_reward:.2f}',
                 'Service Level': f'{avg_service_level:.1f}%',
-                'Stockouts': f'{avg_total_stockouts:.2f}'
+                'L1 Stockouts': f'{avg_stockouts["Location_1"]:.1f}',
+                'L2 Stockouts': f'{avg_stockouts["Location_2"]:.1f}',
+                'L3 Stockouts': f'{avg_stockouts["Location_3"]:.1f}',
+                'Retail Stockouts': f'{avg_stockouts["Retail"]:.1f}'
             })
     
     return rewards_history, metrics_history, episode_lengths, td_errors
@@ -150,7 +170,12 @@ def evaluate(env, agent, num_episodes=100):
     eval_metrics = {
         'rewards': [],
         'service_levels': [],
-        'stockouts': [],
+        'location_stockouts': {
+            'Location_1': [],
+            'Location_2': [],
+            'Location_3': [],
+            'Retail': []
+        },
         'episode_lengths': []
     }
     
@@ -159,7 +184,12 @@ def evaluate(env, agent, num_episodes=100):
         done = False
         episode_reward = 0
         episode_steps = 0
-        total_stockouts = 0 # To store total stockouts for evaluation
+        episode_stockouts = {
+            'Location_1': 0,
+            'Location_2': 0,
+            'Location_3': 0,
+            'Retail': 0
+        }
         
         while not done:
             action = agent.get_action(state, env)
@@ -168,8 +198,14 @@ def evaluate(env, agent, num_episodes=100):
             episode_reward += reward
             episode_steps += 1
             
-            # Track metrics: sum stockouts for evaluation display
-            total_stockouts += sum(info['stockouts'].values())
+            # Track stockouts by location
+            for sku_id, stockout in info['stockouts'].items():
+                sku = env.skus[sku_id]
+                location = sku.inventory_location
+                episode_stockouts[location] += stockout
+                # Track retail stockouts separately
+                if sku.retail_stock <= 0:
+                    episode_stockouts['Retail'] += stockout
             
             state = next_state
         
@@ -178,13 +214,15 @@ def evaluate(env, agent, num_episodes=100):
             service_level * 100 for service_level in info['service_levels'].values()
         ]))
         
-        # Store episode results (convert to native types)
+        # Store episode results
         eval_metrics['rewards'].append(float(episode_reward))
         eval_metrics['service_levels'].append(float(service_level))
-        eval_metrics['stockouts'].append(int(total_stockouts))
+        for location in episode_stockouts:
+            eval_metrics['location_stockouts'][location].append(episode_stockouts[location])
         eval_metrics['episode_lengths'].append(int(episode_steps))
     
     return eval_metrics
+
 def plot_cumulative_reward(eval_metrics, save_dir):
     """Plot the cumulative reward as a function of the number of steps."""
     rewards = eval_metrics['rewards']
@@ -198,6 +236,24 @@ def plot_cumulative_reward(eval_metrics, save_dir):
     plt.legend()
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, 'cumulative_reward.png'))
+    plt.close()
+
+def plot_location_stockouts(eval_metrics, save_dir):
+    """Plot stockouts by location"""
+    plt.figure(figsize=(12, 6))
+    
+    locations = ['Location_1', 'Location_2', 'Location_3', 'Retail']
+    for location in locations:
+        stockouts = eval_metrics['location_stockouts'][location]
+        plt.plot(stockouts, label=location)
+    
+    plt.xlabel('Episode')
+    plt.ylabel('Number of Stockouts')
+    plt.title('Stockouts by Location')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, 'location_stockouts.png'))
     plt.close()
 
 def export_q_table_to_csv(q_table_path, csv_path):
@@ -218,7 +274,6 @@ def export_q_table_to_csv(q_table_path, csv_path):
                 state, action = key, ""
             writer.writerow([str(state), str(action), value])
 
-   
 def main():
     # Create results directory
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -245,30 +300,30 @@ def main():
         num_episodes=num_episodes
     )
     
-    # Plot training progress with seasonal analysis
+    # Plot training progress
     plot_training_progress(rewards_history, td_errors, metrics_history, results_dir)
     
-    # Additional seasonal analysis plots
-    plot_seasonal_analysis(metrics_history, results_dir)
+    # Evaluate the trained agent
+    print("\nEvaluating trained agent...")
+    eval_metrics = evaluate(env, agent, num_episodes=100)
     
-    # Save training results (convert to serializable format)
-    training_results = {
-        'rewards': [float(r) for r in rewards_history],
-        'td_errors': [float(e) for e in td_errors],
-        'metrics': convert_to_serializable(metrics_history),
-        'episode_lengths': [int(l) for l in episode_lengths]
-    }
-    with open(os.path.join(results_dir, 'training_results.json'), 'w') as f:
-        json.dump(training_results, f, indent=4)
-    
-    print("\nEvaluating agent...")
-    print("Running extended evaluation over multiple seasonal cycles...")
-    eval_metrics = evaluate(env, agent, num_episodes=2500)  # Longer evaluation period
-
-    # Plot the cumulative reward as a function of the number of steps
+    # Plot evaluation results
     plot_cumulative_reward(eval_metrics, results_dir)
-
-    eval_rewards_by_type = evaluate_rewards_by_product_type(env, agent, num_episodes=2500)
+    plot_location_stockouts(eval_metrics, results_dir)
+    
+    # Save evaluation metrics
+    eval_metrics_serializable = convert_to_serializable(eval_metrics)
+    with open(os.path.join(results_dir, 'evaluation_metrics.json'), 'w') as f:
+        json.dump(eval_metrics_serializable, f, indent=4)
+    
+    print(f"\nResults saved in {results_dir}")
+    print("\nEvaluation Results:")
+    print(f"Average Reward: {np.mean(eval_metrics['rewards']):.2f}")
+    print(f"Average Service Level: {np.mean(eval_metrics['service_levels']):.1f}%")
+    print("\nAverage Stockouts by Location:")
+    for location in ['Location_1', 'Location_2', 'Location_3', 'Retail']:
+        avg_stockouts = np.mean(eval_metrics['location_stockouts'][location])
+        print(f"{location}: {avg_stockouts:.2f}")
 
     # Save trained agent
     agent.save(os.path.join(results_dir, 'trained_agent.npy'))
@@ -278,98 +333,6 @@ def main():
     csv_path = os.path.join(results_dir, 'q_table.csv')
     export_q_table_to_csv(q_table_path, csv_path)
     print(f"Q-table exported to {csv_path}")
-
-    
-
-    # Save evaluation results
-    with open(os.path.join(results_dir, 'evaluation_results.json'), 'w') as f:
-        json.dump(convert_to_serializable(eval_metrics), f, indent=4)
-    
-    # Print final performance metrics
-    print("\nFinal Performance Metrics:")
-    print(f"Average Reward: {float(np.mean(eval_metrics['rewards'])):.2f}")
-    print(f"Average Service Level: {float(np.mean(eval_metrics['service_levels'])):.2f}%")
-    print(f"Average Stockouts per Episode: {float(np.mean(eval_metrics['stockouts'])):.2f}")
-    print(f"Average Episode Length: {float(np.mean(eval_metrics['episode_lengths'])):.2f}")
-    
-    # Save trained agent
-    agent.save(os.path.join(results_dir, 'trained_agent.npy'))
-
-def plot_seasonal_analysis(metrics_history, save_dir):
-    """Plot additional analysis of seasonal patterns"""
-    # Create figure with subplots
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
-    
-    # Extract data
-    episodes = range(len(metrics_history))
-    
-    # Plot warehouse stock levels for each SKU type
-    for sku_type in ['Type_A', 'Type_B', 'Type_C']:
-        warehouse_levels = [m['warehouse_levels'][sku_type][-1] for m in metrics_history]
-        ax1.plot(episodes, warehouse_levels, label=f'{sku_type} Warehouse')
-    ax1.set_title('Warehouse Stock Levels')
-    ax1.set_xlabel('Episode')
-    ax1.set_ylabel('Stock Level')
-    ax1.legend()
-    
-    
-    # Plot retail stock levels for each SKU type
-    for sku_type in ['Type_A', 'Type_B', 'Type_C']:
-        retail_levels = [m['retail_levels'][sku_type][-1] for m in metrics_history]
-        ax2.plot(episodes, retail_levels, label=f'{sku_type} Retail')
-    ax2.set_title('Retail Stock Levels')
-    ax2.set_xlabel('Episode')
-    ax2.set_ylabel('Stock Level')
-    ax2.legend()
-    
-    # Plot service levels over time
-    service_levels = [m['service_level'] for m in metrics_history]
-    ax3.plot(episodes, service_levels)
-    ax3.set_title('Service Level Over Time')
-    ax3.set_xlabel('Episode')
-    ax3.set_ylabel('Service Level (%)')
-    
-    # Plot supplier reliability
-    for supplier in ['Supplier_X', 'Supplier_Y']:
-        reliability = [m['supplier_reliability'].get(supplier, 0) for m in metrics_history]
-        ax4.plot(episodes, reliability, label=supplier)
-    ax4.set_title('Supplier Reliability')
-    ax4.set_xlabel('Episode')
-    ax4.set_ylabel('Reliability')
-    ax4.legend()
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'seasonal_analysis.png'))
-    plt.close()
-
-#Display the Q-values for each SKU type
-
-def evaluate_rewards_by_product_type(env, agent, num_episodes=100):
-    """
-    Evaluate and aggregate rewards per product type (A, B, C) for each episode.
-    Assumes env.step()'s info dict contains 'sku_rewards' as {sku_type: reward}.
-    Returns a dict: { 'Type_A': [...], 'Type_B': [...], 'Type_C': [...] }
-    """
-    rewards_by_type = {'Type_A': [], 'Type_B': [], 'Type_C': []}
-
-    for episode in range(num_episodes):
-        state = env.reset()
-        done = False
-        episode_rewards = {'Type_A': 0.0, 'Type_B': 0.0, 'Type_C': 0.0}
-
-        while not done:
-            action = agent.get_action(state, env)
-            next_state, reward, done, info = env.step(action)
-            # Aggregate rewards per SKU type
-            sku_rewards = info.get('sku_rewards', {})
-            for sku_type in ['Type_A', 'Type_B', 'Type_C']:
-                episode_rewards[sku_type] += float(sku_rewards.get(sku_type, 0.0))
-            state = next_state
-
-        for sku_type in ['Type_A', 'Type_B', 'Type_C']:
-            rewards_by_type[sku_type].append(episode_rewards[sku_type])
-
-    return rewards_by_type
 
 if __name__ == "__main__":
     # Set random seed for reproducibility

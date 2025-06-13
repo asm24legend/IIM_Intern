@@ -296,21 +296,41 @@ class InventoryEnvironment(gym.Env):
     def calculate_reward(self, sku_id: str, stockout: int, current_stock: int, 
                            daily_demand: float, current_lead_time: int, previous_lead_time: int) -> float:
         """
-        Calculate reward with stronger emphasis on service level and lead time reduction:
-        1. Stockout penalty: -50 per unit stockout
-        2. Service level reward: +20 for fulfilling demand
+        Calculate reward with location-specific rewards and penalties:
+        1. Location-specific stockout penalties
+        2. Location-specific demand fulfillment rewards
         3. Inventory level penalties to maintain efficiency
         4. Lead time reduction rewards
         """
         reward = 0.0
         sku = self.skus[sku_id]
+        location = self.inventory_locations[sku.inventory_location]
         
-        # Major penalty for stockouts
+        # Location-specific stockout penalties
         if stockout > 0:
-            reward -= 40 * stockout
+            # Different penalties based on location
+            if sku.inventory_location == 'Location_1':
+                reward -= 50 * stockout  # Highest penalty for Location 1
+            elif sku.inventory_location == 'Location_2':
+                reward -= 40 * stockout  # Medium penalty for Location 2
+            elif sku.inventory_location == 'Location_3':
+                reward -= 30 * stockout  # Lower penalty for Location 3
+            
+            # Retail stockout penalty (highest priority)
+            if sku.retail_stock <= 0:
+                reward -= 60 * stockout
         else:
-            # Reward for fulfilling demand
-            reward += 100
+            # Location-specific demand fulfillment rewards
+            if sku.inventory_location == 'Location_1':
+                reward += 120  # Highest reward for Location 1
+            elif sku.inventory_location == 'Location_2':
+                reward += 100  # Medium reward for Location 2
+            elif sku.inventory_location == 'Location_3':
+                reward += 80   # Lower reward for Location 3
+            
+            # Retail demand fulfillment reward
+            if sku.retail_stock > 0:
+                reward += 150  # Highest reward for retail fulfillment
         
         # Inventory level penalties
         if current_stock > self.calculate_eoq(sku_id):
@@ -346,20 +366,39 @@ class InventoryEnvironment(gym.Env):
         return np.array(state, dtype=np.int32)
 
     def _replenish_retail(self, sku_id: str, demand: int):
-        """Replenish retail stock from warehouse for a specific SKU."""
+        """Replenish retail stock from any available warehouse location."""
         sku = self.skus[sku_id]
-        location = self.inventory_locations[sku.inventory_location]
+        total_replenished = 0
         
-        # Calculate replenishment quantity
-        shortage = max(0, demand - sku.retail_stock)
-        replenishment = min(shortage, sku.current_stock)
+        # First try to replenish from the primary location
+        primary_location = self.inventory_locations[sku.inventory_location]
+        if sku.current_stock > 0:
+            replenishment = min(demand, sku.current_stock)
+            sku.retail_stock += replenishment
+            sku.current_stock -= replenishment
+            primary_location.current_stock[sku_id] = sku.current_stock
+            total_replenished += replenishment
+            demand -= replenishment
         
-        # Update stock levels
-        sku.retail_stock += replenishment
-        sku.current_stock -= replenishment
-        location.current_stock[sku_id] = sku.current_stock
+        # If still need more, try other locations
+        if demand > 0:
+            for location_name, location in self.inventory_locations.items():
+                if location_name != sku.inventory_location:  # Skip primary location
+                    if sku_id in location.current_stock and location.current_stock[sku_id] > 0:
+                        # Calculate how much we can take from this location
+                        available = location.current_stock[sku_id]
+                        replenishment = min(demand, available)
+                        
+                        # Update stock levels
+                        sku.retail_stock += replenishment
+                        location.current_stock[sku_id] -= replenishment
+                        total_replenished += replenishment
+                        demand -= replenishment
+                        
+                        if demand <= 0:
+                            break
         
-        return replenishment
+        return total_replenished
 
     def step(self, action):
         rewards = np.zeros(len(self.skus))
@@ -374,7 +413,6 @@ class InventoryEnvironment(gym.Env):
         lead_time_reductions = action[num_skus:]
 
         order_quantities = action[:num_skus]
-
         
         # Calculate time since last decision for each SKU
         current_time = self.config['current_time']
@@ -393,6 +431,13 @@ class InventoryEnvironment(gym.Env):
             
             # Update total demand
             sku.total_demand += period_demand
+            
+            # Proactive replenishment check before handling demand
+            # If retail stock is below 1.5x safety stock, replenish immediately
+            if sku.retail_stock < (sku.safety_stock * 1.5):
+                replenishment_needed = int(sku.safety_stock * 1.5) - sku.retail_stock
+                if replenishment_needed > 0:
+                    self._replenish_retail(sku_id, replenishment_needed)
             
             # Handle retail level transactions
             fulfilled_retail_demand = min(period_demand, sku.retail_stock)
@@ -414,10 +459,12 @@ class InventoryEnvironment(gym.Env):
             # Update retail stock
             sku.retail_stock -= fulfilled_retail_demand
 
-            # Always attempt to replenish retail from warehouse up to safety stock
-            replenishment_needed = max(0, sku.safety_stock - sku.retail_stock)
-            if replenishment_needed > 0:
-             replenished = self._replenish_retail(sku_id, replenishment_needed)
+            # Additional replenishment check after demand is handled
+            # If retail stock is below safety stock, try to replenish
+            if sku.retail_stock < sku.safety_stock:
+                replenishment_needed = sku.safety_stock - sku.retail_stock
+                if replenishment_needed > 0:
+                    self._replenish_retail(sku_id, replenishment_needed)
             
             # Process warehouse level operations
             if sku.open_pos > 0 and self._is_delivery_due(sku, current_time):
