@@ -26,6 +26,7 @@ class SKUData:
     next_delivery_date: datetime  
     previous_demand: float = 0
     retail_stock: int = 0  # Stock at retail store
+    stockout_cost_multiplier: float = 1.0 # New field for SKU-specific stockout cost
     # Add seasonal demand parameters
     base_demand: float = 0  # Base demand level
     amplitude: float = 0    # Amplitude of seasonal variation
@@ -115,6 +116,7 @@ class InventoryEnvironment(gym.Env):
                 next_delivery_date=base_date + timedelta(days=7),
                 retail_stock=100,
                 base_demand=400,
+                stockout_cost_multiplier=1.5, # Example: Type A is more critical
                 #amplitude=150,
                 #frequency=2*np.pi/365,  # One year cycle
                 #phase=0,
@@ -138,6 +140,7 @@ class InventoryEnvironment(gym.Env):
                 next_delivery_date=base_date + timedelta(days=10),
                 retail_stock=80,
                 base_demand=300,
+                stockout_cost_multiplier=1.0, # Default priority
                 #amplitude=100,
                 #frequency=2*np.pi/182.5,  # Six month cycle
                 #phase=np.pi/2,
@@ -161,6 +164,7 @@ class InventoryEnvironment(gym.Env):
                 next_delivery_date=base_date + timedelta(days=5),
                 retail_stock=60,
                 base_demand=200,
+                stockout_cost_multiplier=0.8, # Example: Type C is less critical
                 #amplitude=80,
                 #frequency=2*np.pi/91.25,  # Three month cycle
                 #phase=np.pi/4,
@@ -197,7 +201,7 @@ class InventoryEnvironment(gym.Env):
         self.observation_space = spaces.Box(
             low=0,
             high=self.config['max_inventory'],
-            shape=(num_skus,),
+            shape=(num_skus * 2,),  # Each SKU has warehouse and retail stock in state
             dtype=np.int32
         )
         
@@ -333,11 +337,16 @@ class InventoryEnvironment(gym.Env):
         return reward
 
     def _get_state(self):
-        """Convert current system state to observation space format - only inventory levels"""
-        return np.array([sku.current_stock for sku in self.skus.values()], dtype=np.int32)
+        """Return the current state (inventory levels for all SKUs, warehouse and retail)"""
+        state = []
+        for sku_id in sorted(self.skus.keys()): # Ensure consistent order
+            sku = self.skus[sku_id]
+            state.append(sku.current_stock) # Warehouse stock
+            state.append(sku.retail_stock)   # Retail stock
+        return np.array(state, dtype=np.int32)
 
     def _replenish_retail(self, sku_id: str, demand: int):
-        """Transfer inventory from warehouse to retail store"""
+        """Replenish retail stock from warehouse for a specific SKU."""
         sku = self.skus[sku_id]
         location = self.inventory_locations[sku.inventory_location]
         
@@ -363,15 +372,6 @@ class InventoryEnvironment(gym.Env):
         num_skus = len(self.skus)
         order_quantities = action[:num_skus]
         lead_time_reductions = action[num_skus:]
-
-        num_skus = len(self.skus)
-        
-        # Action space: [order_quantities] only (no lead time reductions)
-        self.action_space = spaces.Box(
-            low=np.array([0] * num_skus),  # Only order quantities
-            high=np.array([self.config['max_inventory']] * num_skus),
-            dtype=np.int32
-        )
 
         order_quantities = action[:num_skus]
 
@@ -449,7 +449,7 @@ class InventoryEnvironment(gym.Env):
                         
                         # Apply lead time reduction if requested
                         # Calculate lead time reduction separately from order quantities
-                        lead_time_reduction = action[num_skus + i] if len(action) > num_skus + i else 0
+                        # lead_time_reduction = action[num_skus + i] if len(action) > num_skus + i else 0
                         
                         lead_time_reduction = int(lead_time_reductions[i])
                         if lead_time_reduction > 0:

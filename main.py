@@ -46,7 +46,7 @@ def plot_training_progress(rewards, td_errors, metrics, save_dir):
     ax3.set_ylabel('Service Level (%)')
     
     # Plot stockouts
-    stockouts = [m['total_stockouts'] for m in metrics]
+    stockouts = [sum(m['stockouts'].values()) for m in metrics]
     ax4.plot(stockouts)
     ax4.set_title('Stockouts per Episode')
     ax4.set_xlabel('Episode')
@@ -72,7 +72,7 @@ def train(env, agent, num_episodes=100):
         episode_reward = 0
         episode_steps = 0
         episode_metrics = {
-            'total_stockouts': 0,
+            'stockouts': {},
             'service_level': 0,
             'warehouse_levels': {},
             'retail_levels': {},
@@ -93,10 +93,9 @@ def train(env, agent, num_episodes=100):
             episode_reward += reward
             episode_steps += 1
             
-            # Track stockouts and service level
+            # Track stockouts and service level (now SKU-specific)
             for sku_id in env.skus:
-                stockout = info['stockouts'][sku_id]
-                episode_metrics['total_stockouts'] += stockout
+                episode_metrics['stockouts'][sku_id] = info['stockouts'][sku_id]
             
             # Track inventory levels
             for sku_id in env.skus:
@@ -133,10 +132,15 @@ def train(env, agent, num_episodes=100):
         # Update progress bar
         if (episode + 1) % 10 == 0:
             avg_reward = float(np.mean(rewards_history[-10:]))
-            avg_service_level = float(np.mean([m['service_level'] for m in metrics_history[-10:]]))
+            avg_service_level = float(np.mean([
+                m['service_level'] for m in metrics_history[-10:]
+            ]))
+            # Calculate average total stockouts for progress bar
+            avg_total_stockouts = np.mean([sum(m['stockouts'].values()) for m in metrics_history[-10:]])
             pbar.set_postfix({
                 'Reward': f'{avg_reward:.2f}',
-                'Service Level': f'{avg_service_level:.1f}%'
+                'Service Level': f'{avg_service_level:.1f}%',
+                'Stockouts': f'{avg_total_stockouts:.2f}'
             })
     
     return rewards_history, metrics_history, episode_lengths, td_errors
@@ -155,7 +159,7 @@ def evaluate(env, agent, num_episodes=100):
         done = False
         episode_reward = 0
         episode_steps = 0
-        total_stockouts = 0
+        total_stockouts = 0 # To store total stockouts for evaluation
         
         while not done:
             action = agent.get_action(state, env)
@@ -164,7 +168,7 @@ def evaluate(env, agent, num_episodes=100):
             episode_reward += reward
             episode_steps += 1
             
-            # Track metrics
+            # Track metrics: sum stockouts for evaluation display
             total_stockouts += sum(info['stockouts'].values())
             
             state = next_state
@@ -225,9 +229,7 @@ def main():
     env = InventoryEnvironment()
     agent = TDAgent(
         action_space=env.action_space,
-        learning_rate=0.05,
-        discount_factor=0.99,
-        epsilon=0.
+        discount_factor=0.99
     )
     
     # Training parameters

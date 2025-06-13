@@ -29,27 +29,46 @@ def calculate_six_month_metrics(metrics_history):
         metrics = metrics_history[-(day+1)]  # Start from most recent
         month = day // 30  # Group by month (30-day periods)
         
-        # Track stockouts
-        monthly_stockouts[month].append(metrics.get('stockouts', 0))
+        # Track stockouts (now SKU-specific)
+        total_daily_stockouts = sum(metrics.get('stockouts', {}).values())
+        monthly_stockouts[month].append(total_daily_stockouts)
         
-        # Track inventory levels
+        # Track inventory levels (now SKU-specific)
         for sku_type in ['Type_A', 'Type_B', 'Type_C']:
-            warehouse_level = metrics.get('warehouse_inventory', {}).get(sku_type, 0)
-            retail_level = metrics.get('retail_inventory', {}).get(sku_type, 0)
+            warehouse_level = metrics.get('warehouse_levels', {}).get(sku_type, [])
+            retail_level = metrics.get('retail_levels', {}).get(sku_type, [])
+            
+            # Take the last recorded level for the day
+            current_warehouse_stock = warehouse_level[-1] if warehouse_level else 0
+            current_retail_stock = retail_level[-1] if retail_level else 0
+
             monthly_inventory[month][sku_type].append({
-                'warehouse': warehouse_level,
-                'retail': retail_level,
-                'total': warehouse_level + retail_level
+                'warehouse': current_warehouse_stock,
+                'retail': current_retail_stock,
+                'total': current_warehouse_stock + current_retail_stock
             })
         
-        # Calculate costs
+        # Calculate costs (need to update this to use SKU-specific stockout costs if available)
+        # For now, approximate stockout cost with generic value if multiplier not passed
+        stockout_cost_per_unit = 50 # Default from config, should ideally get from SKUData
+        
         holding_cost = sum(
-            metrics.get('warehouse_inventory', {}).get(sku_type, 0) * 2 +
-            metrics.get('retail_inventory', {}).get(sku_type, 0) * 1.5
+            metrics.get('warehouse_levels', {}).get(sku_type, [])[-1] * 2 + # Assuming last value is end of day
+            metrics.get('retail_levels', {}).get(sku_type, [])[-1] * 1.5   # Assuming last value is end of day
             for sku_type in ['Type_A', 'Type_B', 'Type_C']
+            if metrics.get('warehouse_levels', {}).get(sku_type) and metrics.get('retail_levels', {}).get(sku_type)
         )
-        stockout_cost = metrics.get('stockouts', 0) * 50
-        order_cost = metrics.get('order_cost', 0)
+
+        # Sum up SKU-specific stockout costs from metrics.get('stockouts', {}) - this needs the multiplier
+        # Since the multiplier is in SKUData, we can't directly get it here without passing SKU data to this function
+        # For now, just sum the stockouts, the cost will be generic
+        stockout_cost = sum(metrics.get('stockouts', {}).values()) * stockout_cost_per_unit # This is total stockouts
+        
+        # Order cost is not explicitly tracked in metrics, assuming it's part of the reward
+        # For now, this part remains an approximation or depends on how order_cost is passed
+        # to the metrics from the environment, if it ever is.
+        order_cost = 0 # Placeholder if not directly available
+
         total_cost = holding_cost + stockout_cost + order_cost
         monthly_costs[month].append(total_cost)
     
@@ -125,27 +144,27 @@ def plot_six_month_analysis(metrics, save_dir):
     for month in range(6):
         # Calculate average daily costs for the month
         daily_costs = defaultdict(float)
-        for day in range(len(metrics['costs'][month])):
+        for day_idx in range(len(metrics['costs'][month])):
             # Holding costs
+            # Access warehouse and retail levels from the correctly structured monthly_inventory
             holding_cost = sum(
-                np.mean([
-                    day_data['warehouse'] * 2 + day_data['retail'] * 1.5
-                    for day_data in metrics['inventory'][month][sku_type]
-                ])
+                metrics['inventory'][month][sku_type][day_idx]['warehouse'] * 2 +
+                metrics['inventory'][month][sku_type][day_idx]['retail'] * 1.5
                 for sku_type in ['Type_A', 'Type_B', 'Type_C']
             )
             
-            # Stockout costs
-            stockout_cost = np.mean(metrics['stockouts'][month]) * 50
+            # Stockout costs (using the summed stockouts)
+            stockout_cost_per_unit = 50 # Using the default cost
+            stockout_cost = metrics['stockouts'][month][day_idx] * stockout_cost_per_unit
             
-            # Order costs (remaining cost)
-            total_cost = metrics['costs'][month][day]
-            order_cost = total_cost - (holding_cost + stockout_cost)
+            # Order costs (remaining cost - approximate as before)
+            total_cost_for_day = metrics['costs'][month][day_idx]
+            order_cost = total_cost_for_day - (holding_cost + stockout_cost)
             
             daily_costs['holding'] += holding_cost
             daily_costs['stockout'] += stockout_cost
             daily_costs['order'] += order_cost
-            daily_costs['total'] += total_cost
+            daily_costs['total'] += total_cost_for_day
         
         # Average the costs
         n_days = len(metrics['costs'][month])
@@ -206,8 +225,8 @@ def main():
     
     # Average stockouts
     total_stockouts = sum(
-        sum(stockouts) 
-        for stockouts in metrics['stockouts'].values()
+        sum(monthly_stockouts_list) 
+        for monthly_stockouts_list in metrics['stockouts'].values()
     )
     avg_daily_stockouts = total_stockouts / 180
     print(f"Average Daily Stockouts: {avg_daily_stockouts:.2f}")
@@ -223,12 +242,12 @@ def main():
     # Average inventory levels
     for sku_type in ['Type_A', 'Type_B', 'Type_C']:
         avg_warehouse = np.mean([
-            np.mean([day['warehouse'] for day in month[sku_type]])
-            for month in metrics['inventory'].values()
+            np.mean([day_data['warehouse'] for day_data in month_data[sku_type]])
+            for month_data in metrics['inventory'].values()
         ])
         avg_retail = np.mean([
-            np.mean([day['retail'] for day in month[sku_type]])
-            for month in metrics['inventory'].values()
+            np.mean([day_data['retail'] for day_data in month_data[sku_type]])
+            for month_data in metrics['inventory'].values()
         ])
         print(f"\n{sku_type} Average Inventory Levels:")
         print(f"  Warehouse: {avg_warehouse:.1f} units")
