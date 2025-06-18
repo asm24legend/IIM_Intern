@@ -190,20 +190,24 @@ class InventoryEnvironment(gym.Env):
         
         num_skus = len(self.skus)
         
-        # Action space: [order_quantities, lead_time_reductions]
+        # Initialize action space
         self.action_space = spaces.Box(
-            low=np.array([0] * num_skus + [0] * num_skus),  # [order_qty, lead_time_reduction]
-            high=np.array([self.config['max_inventory']] * num_skus + [self.config['max_lead_time_reduction']] * num_skus),
+            low=np.array([0] * num_skus + [0] * num_skus),  # [order_qty, on_hand]
+            high=np.array([self.config['max_inventory']] * num_skus + [self.config['max_inventory']] * num_skus),
             dtype=np.int32
         )
         
-        # Simplified state space: only inventory levels
-        self.observation_space = spaces.Box(
-            low=0,
-            high=self.config['max_inventory'],
-            shape=(num_skus * 2,),  # Each SKU has warehouse and retail stock in state
-            dtype=np.int32
-        )
+        # Initialize observation space
+        self.observation_space = spaces.Dict({
+            'warehouse_stock': spaces.Box(low=0, high=self.config['max_inventory'], shape=(num_skus,), dtype=np.int32),
+            'retail_stock': spaces.Box(low=0, high=self.config['max_inventory'], shape=(num_skus,), dtype=np.int32),
+            'open_pos': spaces.Box(low=0, high=self.config['max_inventory'], shape=(num_skus,), dtype=np.int32),
+            'demand': spaces.Box(low=0, high=np.inf, shape=(num_skus,), dtype=np.float32),
+            'lead_time': spaces.Box(low=0, high=np.inf, shape=(num_skus,), dtype=np.float32),
+            'supplier_load': spaces.Box(low=0, high=1, shape=(num_skus,), dtype=np.float32),
+            'supplier_reliability': spaces.Box(low=0, high=1, shape=(num_skus,), dtype=np.float32),
+            'time_delta': spaces.Box(low=0, high=np.inf, shape=(num_skus,), dtype=np.float32)
+        })
         
         self.reset()
 
@@ -407,13 +411,11 @@ class InventoryEnvironment(gym.Env):
         stockouts = {}  # Initialize stockouts dictionary for all SKUs
         service_levels = {}  # Track service levels for all SKUs
         
-        # Split action into order quantities and lead time reductions
+        # Split action into order quantities and on_hand_inventory
         num_skus = len(self.skus)
         order_quantities = action[:num_skus]
-        lead_time_reductions = action[num_skus:]
+        on_hand_inventory = action[num_skus:]
 
-        order_quantities = action[:num_skus]
-        
         # Calculate time since last decision for each SKU
         current_time = self.config['current_time']
         time_deltas = {
@@ -432,13 +434,6 @@ class InventoryEnvironment(gym.Env):
             # Update total demand
             sku.total_demand += period_demand
             
-            # Proactive replenishment check before handling demand
-            # If retail stock is below 1.5x safety stock, replenish immediately
-            if sku.retail_stock < (sku.safety_stock * 1.5):
-                replenishment_needed = int(sku.safety_stock * 1.5) - sku.retail_stock
-                if replenishment_needed > 0:
-                    self._replenish_retail(sku_id, replenishment_needed)
-            
             # Handle retail level transactions
             fulfilled_retail_demand = min(period_demand, sku.retail_stock)
             retail_stockout = period_demand - fulfilled_retail_demand
@@ -448,9 +443,9 @@ class InventoryEnvironment(gym.Env):
             if retail_stockout > 0:
                 sku.stockout_occasions += 1
             
-            stockouts[sku_id] = retail_stockout  # Track stockout for each SKU
+            stockouts[sku_id] = retail_stockout
             
-            # Calculate service levels (β / fill rate)
+            # Calculate service levels
             if sku.total_demand > 0:
                 service_levels[sku_id] = sku.fulfilled_demand / sku.total_demand
             else:
@@ -459,8 +454,7 @@ class InventoryEnvironment(gym.Env):
             # Update retail stock
             sku.retail_stock -= fulfilled_retail_demand
 
-            # Additional replenishment check after demand is handled
-            # If retail stock is below safety stock, try to replenish
+            # Proactive replenishment check
             if sku.retail_stock < sku.safety_stock:
                 replenishment_needed = sku.safety_stock - sku.retail_stock
                 if replenishment_needed > 0:
@@ -468,24 +462,18 @@ class InventoryEnvironment(gym.Env):
             
             # Process warehouse level operations
             if sku.open_pos > 0 and self._is_delivery_due(sku, current_time):
-                sku.replenishment_cycles += 1  # Count completed replenishment cycles
+                sku.replenishment_cycles += 1
                 self.skus[sku_id].current_stock += sku.open_pos
                 self.inventory_locations[sku.inventory_location].current_stock[sku_id] += sku.open_pos
                 supplier_loads[sku.supplier] += sku.open_pos
                 self.skus[sku_id].open_pos = 0
             
-            # Process new orders and lead time reductions
+            # Process new orders
             if order_quantities[i] > 0:
                 current_rop = self.calculate_rop(sku_id)
-                # Check if we're below reorder point AND have capacity for new orders
                 if sku.current_stock < current_rop and sku.current_stock < sku.max_stock:
                     best_supplier = self.select_best_supplier(sku_id)
-                    
                     base_order = max(order_quantities[i], sku.min_order_qty)
-                    if period_demand > sku.base_demand * time_deltas[sku_id] * 1.5:
-                        base_order *= 1.5
-                    
-                    # Ensure order won't exceed max stock capacity
                     available_capacity = sku.max_stock - (sku.current_stock + sku.open_pos)
                     order_qty = min(base_order, available_capacity)
                     
@@ -494,28 +482,9 @@ class InventoryEnvironment(gym.Env):
                         self.skus[sku_id].open_pos += order_qty
                         supplier_loads[best_supplier] += order_qty
                         
-                        # Apply lead time reduction if requested
-                        # Calculate lead time reduction separately from order quantities
-                        # lead_time_reduction = action[num_skus + i] if len(action) > num_skus + i else 0
-                        
-                        lead_time_reduction = int(lead_time_reductions[i])
-                        if lead_time_reduction > 0:
-                            #Calculate cost of lead time reduction
-                            reduction_cost = lead_time_reduction * self.config['lead_time_reduction_cost']
-                            #Apply reduction if supplier reliability is good enough
-                            supplier_reliability = self.suppliers[best_supplier]['reliability']
-                            if supplier_reliability >= 0.8:  # Only allow reduction for reliable suppliers
-                                original_lead_time = self.skus[sku_id].lead_time_days
-                                reduced_lead_time = max(
-                                    self.config['min_lead_time'],
-                                    original_lead_time - lead_time_reduction
-                                )
-                                self.skus[sku_id].lead_time_days = reduced_lead_time
-                                #Apply cost penalty for lead time reduction
-                                rewards[i] -= reduction_cost
-                        
-                        self._update_delivery_date(sku_id)
-                        self.adjust_delivery_date(sku_id, period_demand)
+                        # Apply on_hand_inventory
+                        self.skus[sku_id].current_stock += on_hand_inventory[i]
+                        self.inventory_locations[sku.inventory_location].current_stock[sku_id] += on_hand_inventory[i]
             
             # Store previous demand and update last decision time
             self.skus[sku_id].previous_demand = period_demand
@@ -526,7 +495,7 @@ class InventoryEnvironment(gym.Env):
                 sku_id,
                 retail_stockout,
                 self.skus[sku_id].current_stock,
-                period_demand / time_deltas[sku_id],  # Convert to daily rate
+                period_demand / time_deltas[sku_id],
                 self._get_current_lead_time(sku_id),
                 sku.lead_time_days
             )
@@ -550,7 +519,7 @@ class InventoryEnvironment(gym.Env):
             'lead_times': {sku_id: sku.lead_time_days for sku_id, sku in self.skus.items()}
         }
         
-        # Advance simulation time by minimum decision interval
+        # Advance simulation time
         self.config['current_time'] += self.config['min_decision_interval']
         
         # Check terminal conditions
