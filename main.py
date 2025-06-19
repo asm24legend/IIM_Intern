@@ -85,7 +85,8 @@ def train(env, agent, num_episodes=100):
             'service_level': 0,
             'warehouse_levels': {},
             'retail_levels': {},
-            'supplier_reliability': {}
+            'supplier_reliability': {},
+            'transportation_cost': 0.0  # Track total transportation cost for this episode
         }
         
         while not done:
@@ -129,6 +130,9 @@ def train(env, agent, num_episodes=100):
             episode_metrics['supplier_reliability'] = {
                 k: float(v) for k, v in info['supplier_reliability'].items()
             }
+            
+            # Track transportation cost
+            episode_metrics['transportation_cost'] += sum(info.get('transportation_costs', {}).values())
             
             state = next_state
         
@@ -176,7 +180,8 @@ def evaluate(env, agent, num_episodes=100):
             'Location_3': [],
             'Retail': []
         },
-        'episode_lengths': []
+        'episode_lengths': [],
+        'transportation_costs': []  # Track transportation cost per episode
     }
     
     for episode in range(num_episodes):
@@ -206,6 +211,12 @@ def evaluate(env, agent, num_episodes=100):
                 # Track retail stockouts separately
                 if sku.retail_stock <= 0:
                     episode_stockouts['Retail'] += stockout
+            
+            # Track transportation cost for this episode
+            if 'transportation_costs' in info:
+                if len(eval_metrics['transportation_costs']) <= episode:
+                    eval_metrics['transportation_costs'].append(0.0)
+                eval_metrics['transportation_costs'][episode] += sum(info['transportation_costs'].values())
             
             state = next_state
         
@@ -324,6 +335,8 @@ def main():
     for location in ['Location_1', 'Location_2', 'Location_3', 'Retail']:
         avg_stockouts = np.mean(eval_metrics['location_stockouts'][location])
         print(f"{location}: {avg_stockouts:.2f}")
+    if 'transportation_costs' in eval_metrics and len(eval_metrics['transportation_costs']) > 0:
+        print(f"\nAverage Transportation Cost per Episode: {np.mean(eval_metrics['transportation_costs']):.2f}")
 
     # Save trained agent
     agent.save(os.path.join(results_dir, 'trained_agent.npy'))

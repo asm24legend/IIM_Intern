@@ -56,6 +56,7 @@ class InventoryEnvironment(gym.Env):
             'holding_cost': 2,
             'stockout_cost': 50,
             'order_cost': 100,
+            'transportation_cost_per_unit': 5,  # Added transportation cost per unit
             'min_lead_time': 1,
             'max_lead_time': 14,
             'retail_replenishment_time': 1,  # Days to replenish retail from warehouse
@@ -410,6 +411,7 @@ class InventoryEnvironment(gym.Env):
         supplier_loads = defaultdict(float)
         stockouts = {}  # Initialize stockouts dictionary for all SKUs
         service_levels = {}  # Track service levels for all SKUs
+        transportation_costs = {}  # Track transportation costs for all SKUs
         
         # Split action into order quantities and on_hand_inventory
         num_skus = len(self.skus)
@@ -424,6 +426,7 @@ class InventoryEnvironment(gym.Env):
         }
         
         for i, (sku_id, sku) in enumerate(self.skus.items()):
+            transportation_cost = 0  # Always initialize at the start of each SKU loop
             # Calculate demand since last decision
             period_demand = self.calculate_demand_for_period(
                 sku,
@@ -458,7 +461,9 @@ class InventoryEnvironment(gym.Env):
             if sku.retail_stock < sku.safety_stock:
                 replenishment_needed = sku.safety_stock - sku.retail_stock
                 if replenishment_needed > 0:
-                    self._replenish_retail(sku_id, replenishment_needed)
+                    replenished = self._replenish_retail(sku_id, replenishment_needed)
+                    # Transportation cost for moving from warehouse to retail
+                    transportation_cost = replenished * self.config['transportation_cost_per_unit']
             
             # Process warehouse level operations
             if sku.open_pos > 0 and self._is_delivery_due(sku, current_time):
@@ -466,6 +471,8 @@ class InventoryEnvironment(gym.Env):
                 self.skus[sku_id].current_stock += sku.open_pos
                 self.inventory_locations[sku.inventory_location].current_stock[sku_id] += sku.open_pos
                 supplier_loads[sku.supplier] += sku.open_pos
+                # Transportation cost for delivery from supplier to warehouse
+                transportation_cost = sku.open_pos * self.config['transportation_cost_per_unit']
                 self.skus[sku_id].open_pos = 0
             
             # Process new orders
@@ -490,7 +497,7 @@ class InventoryEnvironment(gym.Env):
             self.skus[sku_id].previous_demand = period_demand
             self.skus[sku_id].last_decision_time = current_time
             
-            # Calculate rewards
+            # Calculate rewards (subtract transportation cost)
             rewards[i] = self.calculate_reward(
                 sku_id,
                 retail_stockout,
@@ -498,7 +505,8 @@ class InventoryEnvironment(gym.Env):
                 period_demand / time_deltas[sku_id],
                 self._get_current_lead_time(sku_id),
                 sku.lead_time_days
-            )
+            ) - transportation_cost
+            transportation_costs[sku_id] = transportation_cost
         
         # Update supplier metrics
         for supplier_id, load in supplier_loads.items():
@@ -516,7 +524,8 @@ class InventoryEnvironment(gym.Env):
             'supplier_reliability': {supplier: info['reliability'] for supplier, info in self.suppliers.items()},
             'time_deltas': time_deltas,
             'current_time': current_time,
-            'lead_times': {sku_id: sku.lead_time_days for sku_id, sku in self.skus.items()}
+            'lead_times': {sku_id: sku.lead_time_days for sku_id, sku in self.skus.items()},
+            'transportation_costs': transportation_costs  # Add transportation costs to info
         }
         
         # Advance simulation time
