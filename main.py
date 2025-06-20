@@ -1,6 +1,6 @@
 import numpy as np
 from inventory_env import InventoryEnvironment
-from q_learning_agent import TDAgent
+from q_learning_agent import TDAgent, DQNAgent
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import json
@@ -285,50 +285,23 @@ def export_q_table_to_csv(q_table_path, csv_path):
                 state, action = key, ""
             writer.writerow([str(state), str(action), value])
 
-def main():
-    # Create results directory
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    results_dir = f'results_{timestamp}'
-    os.makedirs(results_dir, exist_ok=True)
-    
-    # Initialize environment and agent
-    env = InventoryEnvironment()
-    agent = TDAgent(
-        action_space=env.action_space,
-        discount_factor=0.99
-    )
-    
-    # Training parameters
-    num_episodes = 1000
-    eval_interval = 100
-    
-    print("Starting training...")
-    print(f"Training will run for {num_episodes} episodes")
-    
+def run_and_evaluate_agent(agent, env, num_episodes, results_dir, agent_name):
+    print(f"\nTraining {agent_name}...")
     rewards_history, metrics_history, episode_lengths, td_errors = train(
-        env, 
+        env,
         agent,
         num_episodes=num_episodes
     )
-    
-    # Plot training progress
     plot_training_progress(rewards_history, td_errors, metrics_history, results_dir)
-    
-    # Evaluate the trained agent
-    print("\nEvaluating trained agent...")
+    print(f"\nEvaluating {agent_name}...")
     eval_metrics = evaluate(env, agent, num_episodes=100)
-    
-    # Plot evaluation results
     plot_cumulative_reward(eval_metrics, results_dir)
     plot_location_stockouts(eval_metrics, results_dir)
-    
-    # Save evaluation metrics
     eval_metrics_serializable = convert_to_serializable(eval_metrics)
-    with open(os.path.join(results_dir, 'evaluation_metrics.json'), 'w') as f:
+    with open(os.path.join(results_dir, f'evaluation_metrics_{agent_name}.json'), 'w') as f:
         json.dump(eval_metrics_serializable, f, indent=4)
-    
-    print(f"\nResults saved in {results_dir}")
-    print("\nEvaluation Results:")
+    print(f"\nResults for {agent_name} saved in {results_dir}")
+    print(f"\nEvaluation Results for {agent_name}:")
     print(f"Average Reward: {np.mean(eval_metrics['rewards']):.2f}")
     print(f"Average Service Level: {np.mean(eval_metrics['service_levels']):.1f}%")
     print("\nAverage Stockouts by Location:")
@@ -337,17 +310,39 @@ def main():
         print(f"{location}: {avg_stockouts:.2f}")
     if 'transportation_costs' in eval_metrics and len(eval_metrics['transportation_costs']) > 0:
         print(f"\nAverage Transportation Cost per Episode: {np.mean(eval_metrics['transportation_costs']):.2f}")
+    return eval_metrics
 
-    # Save trained agent
-    agent.save(os.path.join(results_dir, 'trained_agent.npy'))
+def main():
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    results_dir = f'results_{timestamp}'
+    os.makedirs(results_dir, exist_ok=True)
 
-    # Export Q-table to CSV
-    q_table_path = os.path.join(results_dir, 'trained_agent.npy')
-    csv_path = os.path.join(results_dir, 'q_table.csv')
-    export_q_table_to_csv(q_table_path, csv_path)
-    print(f"Q-table exported to {csv_path}")
+    # TDAgent
+    env_td = InventoryEnvironment()
+    td_agent = TDAgent(action_space=env_td.action_space, discount_factor=0.99)
+    td_metrics = run_and_evaluate_agent(td_agent, env_td, num_episodes=1000, results_dir=results_dir, agent_name='TDAgent')
+
+    # DQNAgent
+    env_dqn = InventoryEnvironment()
+    state_dim = env_dqn.observation_space['warehouse_stock'].shape[0] + env_dqn.observation_space['retail_stock'].shape[0]
+    action_dim = env_dqn.action_space.shape[0]
+    dqn_agent = DQNAgent(state_dim=state_dim, action_dim=action_dim, action_space=env_dqn.action_space, discount_factor=0.99)
+    dqn_metrics = run_and_evaluate_agent(dqn_agent, env_dqn, num_episodes=1000, results_dir=results_dir, agent_name='DQNAgent')
+
+    # Print comparison
+    print("\n==================== Comparison ====================")
+    print("Metric                | TDAgent     | DQNAgent")
+    print("----------------------|-------------|-------------")
+    print(f"Avg Reward            | {np.mean(td_metrics['rewards']):10.2f} | {np.mean(dqn_metrics['rewards']):10.2f}")
+    print(f"Avg Service Level (%) | {np.mean(td_metrics['service_levels']):10.1f} | {np.mean(dqn_metrics['service_levels']):10.1f}")
+    for location in ['Location_1', 'Location_2', 'Location_3', 'Retail']:
+        td_stock = np.mean(td_metrics['location_stockouts'][location])
+        dqn_stock = np.mean(dqn_metrics['location_stockouts'][location])
+        print(f"Avg Stockouts {location:>9} | {td_stock:10.2f} | {dqn_stock:10.2f}")
+    if 'transportation_costs' in td_metrics and 'transportation_costs' in dqn_metrics:
+        print(f"Avg Transportation Cost| {np.mean(td_metrics['transportation_costs']):10.2f} | {np.mean(dqn_metrics['transportation_costs']):10.2f}")
+    print("===================================================\n")
 
 if __name__ == "__main__":
-    # Set random seed for reproducibility
     np.random.seed(42)
     main() 
