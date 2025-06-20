@@ -1,5 +1,10 @@
 import numpy as np
 from collections import defaultdict
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import random
+from collections import deque
 
 class TDAgent:
     def __init__(self, action_space, learning_rate=0.01, discount_factor=0.99, epsilon=1.0):
@@ -27,14 +32,12 @@ class TDAgent:
         self.td_errors = []
         
         # Number of discrete levels for order quantities and lead time reductions
-        self.num_order_levels = 10
-        self.num_lead_time_levels = 4  # 0 to max_lead_time_reduction
+        self.num_action_levels = 10
         
         # Define actual discrete values for order quantities and lead time reductions
         # These depend on the environment's action space (max_inventory, max_lead_time_reduction)
         # Will be initialized more precisely when environment is available.
-        self.order_level_values = None
-        self.lead_time_reduction_values = None
+        self.action_level_values = None
     
     def discretize_state(self, state):
         """
@@ -53,15 +56,12 @@ class TDAgent:
         num_skus = len(env.skus)
 
         # Initialize order and lead time reduction values if not already done
-        if self.order_level_values is None:
+        if self.action_level_values is None:
             # Assuming action_space.high[0] gives max_inventory for order quantities
-            self.order_level_values = np.linspace(0, env.action_space.high[0], self.num_order_levels, dtype=np.int32)
-        if self.lead_time_reduction_values is None:
-            # Assuming action_space.high[-1] gives max_lead_time_reduction
-            self.lead_time_reduction_values = np.arange(0, self.num_lead_time_levels, dtype=np.int32)
+            self.action_level_values = np.linspace(0, env.action_space.high[0], self.num_action_levels, dtype=np.int32)
 
         # Dynamically size the Q-table for this state if not already sized
-        expected_q_table_size = num_skus * self.num_order_levels + num_skus * self.num_lead_time_levels
+        expected_q_table_size = num_skus * self.num_action_levels * 2  # [order_qty, on_hand] for each SKU
         discrete_state = self.discretize_state(state)
         if len(self.q_table[discrete_state]) != expected_q_table_size:
             self.q_table[discrete_state] = np.zeros(expected_q_table_size)
@@ -69,39 +69,27 @@ class TDAgent:
 
         if np.random.random() < self.epsilon:
             # Random action
-            random_order_levels = np.random.randint(0, self.num_order_levels, num_skus)
-            random_lead_time_levels = np.random.randint(0, self.num_lead_time_levels, num_skus)
-
-            order_quantities = self.order_level_values[random_order_levels]
-            lead_time_reductions = self.lead_time_reduction_values[random_lead_time_levels]
-
-            return np.concatenate([order_quantities, lead_time_reductions])
+            random_levels = np.random.randint(0, self.num_action_levels, num_skus * 2)
+            action = self.action_level_values[random_levels]
+            return action
         
         q_values = self.q_table[discrete_state]
         
-        best_orders = np.zeros(num_skus)
-        best_reductions = np.zeros(num_skus)
+        best_action = np.zeros(num_skus * 2)
         
-        for i in range(num_skus):
+        for i in range(num_skus * 2):
             # Extract Q-values for order quantity levels for current SKU
-            order_q_start_idx = i * self.num_order_levels
-            order_q_end_idx = order_q_start_idx + self.num_order_levels
-            sku_order_q_values = q_values[order_q_start_idx:order_q_end_idx]
-
-            # Extract Q-values for lead time reduction levels for current SKU
-            lead_time_q_start_idx = num_skus * self.num_order_levels + i * self.num_lead_time_levels
-            lead_time_q_end_idx = lead_time_q_start_idx + self.num_lead_time_levels
-            sku_lead_time_q_values = q_values[lead_time_q_start_idx:lead_time_q_end_idx]
+            idx_start = i * self.num_action_levels
+            idx_end = idx_start + self.num_action_levels
+            action_qs = q_values[idx_start:idx_end]
 
             # Get best discrete level index for each SKU
-            best_order_level_idx = np.argmax(sku_order_q_values)
-            best_lead_time_level_idx = np.argmax(sku_lead_time_q_values)
+            best_idx = np.argmax(action_qs)
 
             # Convert discrete level to actual value
-            best_orders[i] = self.order_level_values[best_order_level_idx]
-            best_reductions[i] = self.lead_time_reduction_values[best_lead_time_level_idx]
+            best_action[i] = self.action_level_values[best_idx]
         
-        return np.concatenate([best_orders, best_reductions])
+        return best_action
     
     def learn(self, state, action, reward, next_state):
         """
@@ -112,7 +100,7 @@ class TDAgent:
         
         # Ensure next_q_values are initialized if next_state is new
         num_skus = len(state) // 2 # Assuming state is [warehouse_sku1, retail_sku1, ...]
-        expected_q_table_size = num_skus * self.num_order_levels + num_skus * self.num_lead_time_levels
+        expected_q_table_size = num_skus * self.num_action_levels * 2
         
         if len(self.q_table[next_state_discrete]) != expected_q_table_size:
             self.q_table[next_state_discrete] = np.zeros(expected_q_table_size)
@@ -122,40 +110,27 @@ class TDAgent:
         
         # Identify the discrete levels that correspond to the continuous actions taken
         # This requires finding the closest discrete value for each continuous action component.
-        num_skus_action = len(action) // 2 # Action is [order_qty_sku1,..., lead_time_red_sku1,...]
+        num_skus_action = len(action) // 2 # Action is [order_qty_sku1,..., on_hand_sku1,...]
 
-        chosen_order_levels_indices = np.zeros(num_skus_action, dtype=np.int32)
-        chosen_lead_time_levels_indices = np.zeros(num_skus_action, dtype=np.int32)
+        chosen_action_indices = np.zeros(num_skus_action, dtype=np.int32)
 
         for i in range(num_skus_action):
-            chosen_order_levels_indices[i] = np.argmin(np.abs(self.order_level_values - action[i]))
-            chosen_lead_time_levels_indices[i] = np.argmin(np.abs(self.lead_time_reduction_values - action[num_skus_action + i]))
+            chosen_action_indices[i] = np.argmin(np.abs(self.action_level_values - action[i]))
 
         total_td_error = 0
         
         for i in range(num_skus_action):
             # Update Q-value for order quantity decision for this SKU
-            order_level_idx = chosen_order_levels_indices[i]
-            q_idx_in_flat_array = i * self.num_order_levels + order_level_idx
+            action_idx = chosen_action_indices[i]
+            q_idx = i * self.num_action_levels + action_idx
             
             # Max Q-value for the next state and this SKU's order levels
-            max_next_q_order = np.max(next_q_values[i*self.num_order_levels : (i+1)*self.num_order_levels])
-            td_target_order = reward + self.discount_factor * max_next_q_order
-            td_error_order = td_target_order - current_q_values[q_idx_in_flat_array]
-            current_q_values[q_idx_in_flat_array] += self.learning_rate * td_error_order
-            total_td_error += td_error_order
+            max_next_q = np.max(next_q_values[i*self.num_action_levels : (i+1)*self.num_action_levels])
+            td_target = reward + self.discount_factor * max_next_q
+            td_error = td_target - current_q_values[q_idx]
+            current_q_values[q_idx] += self.learning_rate * td_error
+            total_td_error += td_error
 
-            # Update Q-value for lead time reduction decision for this SKU
-            lead_time_level_idx = chosen_lead_time_levels_indices[i]
-            q_idx_in_flat_array_lt = num_skus_action * self.num_order_levels + i * self.num_lead_time_levels + lead_time_level_idx
-
-            # Max Q-value for the next state and this SKU's lead time reduction levels
-            max_next_q_lt = np.max(next_q_values[num_skus_action * self.num_order_levels + i*self.num_lead_time_levels : num_skus_action * self.num_order_levels + (i+1)*self.num_lead_time_levels])
-            td_target_lead_time = reward + self.discount_factor * max_next_q_lt
-            td_error_lead_time = td_target_lead_time - current_q_values[q_idx_in_flat_array_lt]
-            current_q_values[q_idx_in_flat_array_lt] += self.learning_rate * td_error_lead_time
-            total_td_error += td_error_lead_time
-        
         # Average TD error across all action components (2 actions per SKU)
         avg_td_error = total_td_error / (2 * num_skus_action)
         self.td_errors.append(avg_td_error)
@@ -180,3 +155,111 @@ class TDAgent:
         loaded_dict = np.load(filename, allow_pickle=True).item()
         self.q_table = defaultdict(lambda: np.zeros(self.action_space.shape[0]))
         self.q_table.update(loaded_dict) 
+
+class DQN(nn.Module):
+    def __init__(self, state_dim, action_dim, hidden_dim=128):
+        super(DQN, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, action_dim)
+        )
+    def forward(self, x):
+        return self.net(x)
+
+class DQNAgent:
+    def __init__(self, state_dim, action_dim, action_space, learning_rate=1e-3, discount_factor=0.99, epsilon=1.0, batch_size=64, buffer_size=10000, target_update=100):
+        self.state_dim = state_dim
+        self.action_dim = action_dim
+        self.action_space = action_space
+        self.lr = learning_rate
+        self.gamma = discount_factor
+        self.epsilon = epsilon
+        self.epsilon_min = 0.01
+        self.epsilon_decay = 0.995
+        self.batch_size = batch_size
+        self.buffer_size = buffer_size
+        self.target_update = target_update
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        self.policy_net = DQN(state_dim, action_dim).to(self.device)
+        self.target_net = DQN(state_dim, action_dim).to(self.device)
+        self.target_net.load_state_dict(self.policy_net.state_dict())
+        self.target_net.eval()
+        self.optimizer = optim.Adam(self.policy_net.parameters(), lr=self.lr)
+        self.memory = deque(maxlen=buffer_size)
+        self.td_errors = []
+        self.learn_step = 0
+
+    def get_action(self, state, env=None):
+        state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        if np.random.rand() < self.epsilon:
+            # Sample random action from action_space
+            action = self.action_space.sample()
+            return action
+        with torch.no_grad():
+            q_values = self.policy_net(state).cpu().numpy().flatten()
+        # For each action dimension, pick the closest valid action in the space
+        # (Assume action_space is Box, so clip to bounds)
+        action = np.clip(q_values, self.action_space.low, self.action_space.high)
+        return action
+
+    def store(self, state, action, reward, next_state, done):
+        self.memory.append((state, action, reward, next_state, done))
+
+    def learn(self, state, action, reward, next_state, done=False):
+        self.store(state, action, reward, next_state, done)
+        if len(self.memory) < self.batch_size:
+            return 0.0
+        batch = random.sample(self.memory, self.batch_size)
+        states, actions, rewards, next_states, dones = zip(*batch)
+        states = torch.FloatTensor(np.array(states)).to(self.device)
+        actions = torch.FloatTensor(np.array(actions)).to(self.device)
+        rewards = torch.FloatTensor(np.array(rewards)).unsqueeze(1).to(self.device)
+        next_states = torch.FloatTensor(np.array(next_states)).to(self.device)
+        dones = torch.FloatTensor(np.array(dones)).unsqueeze(1).to(self.device)
+
+        # Q(s,a) for taken actions
+        q_values = self.policy_net(states)
+        # For continuous actions, treat Q(s,a) as the value for the action vector
+        # Use MSE between predicted Q and target Q
+        # For each sample, get Q-value for the action taken (closest index)
+        # Here, we use the sum Q-value as a proxy (since action is continuous)
+        q_pred = q_values.sum(dim=1, keepdim=True)
+
+        # Q(s',a') for next state (max over actions)
+        with torch.no_grad():
+            next_q_values = self.target_net(next_states)
+            next_q = next_q_values.sum(dim=1, keepdim=True)
+            target_q = rewards + self.gamma * next_q * (1 - dones)
+
+        loss = nn.MSELoss()(q_pred, target_q)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        td_error = (q_pred - target_q).abs().mean().item()
+        self.td_errors.append(td_error)
+
+        # Update target network
+        self.learn_step += 1
+        if self.learn_step % self.target_update == 0:
+            self.target_net.load_state_dict(self.policy_net.state_dict())
+
+        # Decay epsilon
+        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
+        return td_error
+
+    def get_average_td_error(self, window=100):
+        if len(self.td_errors) == 0:
+            return 0
+        return np.mean(self.td_errors[-window:])
+
+    def save(self, filename):
+        torch.save(self.policy_net.state_dict(), filename + '_dqn.pt')
+
+    def load(self, filename):
+        self.policy_net.load_state_dict(torch.load(filename + '_dqn.pt', map_location=self.device))
+        self.target_net.load_state_dict(self.policy_net.state_dict()) 
