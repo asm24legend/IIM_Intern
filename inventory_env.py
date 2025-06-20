@@ -440,13 +440,16 @@ class InventoryEnvironment(gym.Env):
             # Handle retail level transactions
             fulfilled_retail_demand = min(period_demand, sku.retail_stock)
             retail_stockout = period_demand - fulfilled_retail_demand
-            
+            # Calculate warehouse-level stockout (if retail + warehouse cannot fulfill demand)
+            total_available = sku.retail_stock + sku.current_stock
+            total_stockout = max(0, period_demand - total_available)
+            warehouse_stockout = max(0, total_stockout)
             # Update service level metrics
             sku.fulfilled_demand += fulfilled_retail_demand
-            if retail_stockout > 0:
+            if retail_stockout > 0 or warehouse_stockout > 0:
                 sku.stockout_occasions += 1
-            
-            stockouts[sku_id] = retail_stockout
+            # Report the sum of retail and warehouse stockouts for metrics
+            stockouts[sku_id] = retail_stockout + warehouse_stockout
             
             # Calculate service levels
             if sku.total_demand > 0:
@@ -500,7 +503,7 @@ class InventoryEnvironment(gym.Env):
             # Calculate rewards (subtract transportation cost)
             rewards[i] = self.calculate_reward(
                 sku_id,
-                retail_stockout,
+                retail_stockout + warehouse_stockout,
                 self.skus[sku_id].current_stock,
                 period_demand / time_deltas[sku_id],
                 self._get_current_lead_time(sku_id),
