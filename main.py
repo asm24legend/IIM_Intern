@@ -416,6 +416,12 @@ def main():
     export_q_table_to_csv(q_table_path, csv_path)
     print(f"Q-table exported to {csv_path}")
 
+    # Print average reward per step for both agents
+    avg_reward_per_step_q = np.mean(eval_metrics['rewards']) / np.mean(eval_metrics['episode_lengths'])
+    avg_reward_per_step_random = np.mean(random_metrics['rewards']) / np.mean(random_metrics['episode_lengths'])
+    print(f"Average Reward per Step (Q-learning): {avg_reward_per_step_q:.2f}")
+    print(f"Average Reward per Step (Random): {avg_reward_per_step_random:.2f}")
+
 if __name__ == "__main__":
     # Set random seed for reproducibility
     np.random.seed(42)

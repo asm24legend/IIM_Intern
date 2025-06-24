@@ -27,6 +27,9 @@ class SKUData:
     previous_demand: float = 0
     retail_stock: int = 0  # Stock at retail store
     stockout_cost_multiplier: float = 1.0 # New field for SKU-specific stockout cost
+    # Add ABC classification and value
+    abc_class: str = 'C'  # A, B, or C classification
+    unit_value: float = 0.0  # Per-unit value for revenue/cost analysis
     # Add seasonal demand parameters
     base_demand: float = 0  # Base demand level
     amplitude: float = 0    # Amplitude of seasonal variation
@@ -102,22 +105,24 @@ class InventoryEnvironment(gym.Env):
             'Type_A': SKUData(
                 sku='Type_A',
                 description='Product Type A',
-                current_stock=1000,
-                reorder_point=300,
-                safety_stock=200,
-                lead_time_days=7,
-                forecasted_demand=400,
-                eoq=250,
-                max_stock=1000,
-                min_order_qty=100,
+                current_stock=100,
+                reorder_point=30,
+                safety_stock=20,
+                lead_time_days=3,
+                forecasted_demand=50,
+                eoq=20,
+                max_stock=150,
+                min_order_qty=10,
                 inventory_location='Location_1',
                 supplier='Supplier_X',
                 open_pos=0,
                 last_order_date=base_date,
-                next_delivery_date=base_date + timedelta(days=7),
-                retail_stock=100,
-                base_demand=400,
-                stockout_cost_multiplier=1.5, # Example: Type A is more critical
+                next_delivery_date=base_date + timedelta(days=3),
+                retail_stock=30,
+                base_demand=50,
+                stockout_cost_multiplier=2.0, # High penalty for stockout
+                abc_class='A',
+                unit_value=1000.0,  # High value
                 #amplitude=150,
                 #frequency=2*np.pi/365,  # One year cycle
                 #phase=0,
@@ -126,22 +131,24 @@ class InventoryEnvironment(gym.Env):
             'Type_B': SKUData(
                 sku='Type_B',
                 description='Product Type B',
-                current_stock=350,
-                reorder_point=250,
-                safety_stock=150,
-                lead_time_days=10,
-                forecasted_demand=300,
-                eoq=200,
-                max_stock=800,
-                min_order_qty=80,
+                current_stock=300,
+                reorder_point=100,
+                safety_stock=60,
+                lead_time_days=7,
+                forecasted_demand=200,
+                eoq=60,
+                max_stock=400,
+                min_order_qty=40,
                 inventory_location='Location_2',
                 supplier='Supplier_Y',
                 open_pos=0,
                 last_order_date=base_date,
-                next_delivery_date=base_date + timedelta(days=10),
-                retail_stock=80,
-                base_demand=300,
-                stockout_cost_multiplier=1.0, # Default priority
+                next_delivery_date=base_date + timedelta(days=7),
+                retail_stock=60,
+                base_demand=200,
+                stockout_cost_multiplier=1.0, # Moderate penalty
+                abc_class='B',
+                unit_value=300.0,  # Moderate value
                 #amplitude=100,
                 #frequency=2*np.pi/182.5,  # Six month cycle
                 #phase=np.pi/2,
@@ -150,22 +157,24 @@ class InventoryEnvironment(gym.Env):
             'Type_C': SKUData(
                 sku='Type_C',
                 description='Product Type C',
-                current_stock=500,
-                reorder_point=200,
-                safety_stock=100,
-                lead_time_days=5,
-                forecasted_demand=200,
-                eoq=150,
-                max_stock=600,
-                min_order_qty=50,
+                current_stock=800,
+                reorder_point=300,
+                safety_stock=50,
+                lead_time_days=10,
+                forecasted_demand=1000,
+                eoq=300,
+                max_stock=1200,
+                min_order_qty=100,
                 inventory_location='Location_3',
                 supplier='Supplier_Z',
                 open_pos=0,
                 last_order_date=base_date,
-                next_delivery_date=base_date + timedelta(days=5),
-                retail_stock=60,
-                base_demand=200,
-                stockout_cost_multiplier=0.8, # Example: Type C is less critical
+                next_delivery_date=base_date + timedelta(days=10),
+                retail_stock=150,
+                base_demand=1000,
+                stockout_cost_multiplier=0.5, # Low penalty for stockout
+                abc_class='C',
+                unit_value=50.0,  # Low value, high demand
                 #amplitude=80,
                 #frequency=2*np.pi/91.25,  # Three month cycle
                 #phase=np.pi/4,
