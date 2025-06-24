@@ -159,7 +159,7 @@ class InventoryEnvironment(gym.Env):
                 max_stock=600,
                 min_order_qty=50,
                 inventory_location='Location_3',
-                supplier='Supplier_Y',
+                supplier='Supplier_Z',
                 open_pos=0,
                 last_order_date=base_date,
                 next_delivery_date=base_date + timedelta(days=5),
@@ -185,7 +185,13 @@ class InventoryEnvironment(gym.Env):
                 'lead_time_range': (7, 12),
                 'current_load': 0,
                 'reliability': 0.90,
-                'products': ['Type_B', 'Type_C']
+                'products': ['Type_B']  # Only Type_B now
+            },
+            'Supplier_Z': {
+                'lead_time_range': (6, 11),
+                'current_load': 0,
+                'reliability': 0.92,
+                'products': ['Type_C']  # New supplier for Type_C
             }
         }
         
