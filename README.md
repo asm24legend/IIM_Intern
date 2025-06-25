@@ -1,6 +1,6 @@
-# Q-Learning Based Inventory Management System
+# Double Q-Learning Based Inventory Management System
 
-This project implements a sophisticated Q-learning based inventory management system with multi-echelon supply chain optimization. The system uses temporal difference learning with eligibility traces to manage inventory levels across multiple locations while considering seasonal demand patterns.
+This project implements a sophisticated Double Q-learning based inventory management system with multi-echelon supply chain optimization. The system uses temporal difference learning with eligibility traces to manage inventory levels across multiple locations while considering seasonal demand patterns.
 
 ## Features
 
@@ -21,7 +21,7 @@ This project implements a sophisticated Q-learning based inventory management sy
 - **Advanced Learning Strategy**
   - Dual-phase learning:
     * Phase 1 (Episodes 1-500): SARSA with EOQ-based exploration
-    * Phase 2 (Episodes 501+): Q-learning with Boltzmann exploration
+    * Phase 2 (Episodes 501+): Double Q-learning with Boltzmann exploration
   - TD(λ) with eligibility traces
   - Enhanced numerical stability
   - Extended training (15,000 episodes)
@@ -56,7 +56,7 @@ pip install numpy matplotlib seaborn
 
 ## Usage
 
-1. Run the Q-learning agent:
+1. Run the Double Q-learning agent:
 ```bash
 python q_learning_agent.py
 ```

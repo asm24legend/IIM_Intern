@@ -6,6 +6,8 @@ from tqdm import tqdm
 import json
 import os
 from datetime import datetime
+import pickle
+import csv
 
 def convert_to_serializable(obj):
     """Convert numpy types to native Python types for JSON serialization"""
@@ -169,8 +171,8 @@ def train(env, agent, num_episodes=100, max_steps=500):
     
     return rewards_history, metrics_history, episode_lengths, td_errors
 
-def evaluate(env, agent, num_episodes=100, max_steps=500):
-    """Evaluate the trained agent"""
+def evaluate(env, agent, num_episodes=100, max_steps=500, episode_lengths_override=None):
+    """Evaluate the trained agent (optionally using provided episode lengths per episode)"""
     eval_metrics = {
         'rewards': [],
         'service_levels': [],
@@ -195,43 +197,34 @@ def evaluate(env, agent, num_episodes=100, max_steps=500):
             'Location_3': 0,
             'Retail': 0
         }
-        
-        while not done and episode_steps < max_steps:
-            action = agent.get_action(state, env)
+        # Determine the max steps for this episode
+        this_max_steps = max_steps
+        if episode_lengths_override is not None and episode < len(episode_lengths_override):
+            this_max_steps = episode_lengths_override[episode]
+        while not done and episode_steps < this_max_steps:
+            action = agent.get_action(state, env, greedy=True)
             next_state, reward, done, info = env.step(action)
-            
             episode_reward += reward
             episode_steps += 1
-            
-            # Track stockouts by location
             for sku_id, stockout in info['stockouts'].items():
                 sku = env.skus[sku_id]
                 location = sku.inventory_location
                 episode_stockouts[location] += stockout
-                # Track retail stockouts separately
                 if sku.retail_stock <= 0:
                     episode_stockouts['Retail'] += stockout
-            
-            # Track transportation cost for this episode
             if 'transportation_costs' in info:
                 if len(eval_metrics['transportation_costs']) <= episode:
                     eval_metrics['transportation_costs'].append(0.0)
                 eval_metrics['transportation_costs'][episode] += sum(info['transportation_costs'].values())
-            
             state = next_state
-        
-        # Get service level from environment info
         service_level = float(np.mean([
             service_level * 100 for service_level in info['service_levels'].values()
         ]))
-        
-        # Store episode results
         eval_metrics['rewards'].append(float(episode_reward))
         eval_metrics['service_levels'].append(float(service_level))
         for location in episode_stockouts:
             eval_metrics['location_stockouts'][location].append(episode_stockouts[location])
         eval_metrics['episode_lengths'].append(int(episode_steps))
-    
     return eval_metrics
 
 def plot_cumulative_reward(eval_metrics, save_dir):
@@ -271,8 +264,6 @@ def export_q_table_to_csv(q_table_path, csv_path):
     """
     Load a Q-table from a .npy file and export it to a readable CSV file.
     """
-    import csv
-
     q_table = np.load(q_table_path, allow_pickle=True).item()
     with open(csv_path, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
@@ -286,10 +277,25 @@ def export_q_table_to_csv(q_table_path, csv_path):
             writer.writerow([str(state), str(action), value])
 
 class RandomAgent:
-    def __init__(self, action_space):
-        self.action_space = action_space
-    def get_action(self, state, env=None):
-        return self.action_space.sample()
+    def __init__(self, env):
+        self.env = env
+        self.action_space = env.action_space
+    def get_action(self, state, env=None, greedy=False):
+        # Basic EOQ policy: if warehouse stock < reorder point, order up to EOQ, else order 0. Lead time reduction = 0.
+        num_skus = len(self.env.skus)
+        order_quantities = np.zeros(num_skus, dtype=np.int32)
+        lead_time_reductions = np.zeros(num_skus, dtype=np.int32)
+        for i, sku_id in enumerate(self.env.skus):
+            sku = self.env.skus[sku_id]
+            warehouse_stock = state[2*i]
+            reorder_point = sku.reorder_point
+            eoq = sku.eoq
+            if warehouse_stock < reorder_point:
+                order_quantities[i] = eoq
+            else:
+                order_quantities[i] = 0
+            lead_time_reductions[i] = 0
+        return np.concatenate([order_quantities, lead_time_reductions])
     def learn(self, *args, **kwargs):
         return 0.0
     def get_average_td_error(self):
@@ -311,7 +317,7 @@ def main():
     )
     
     # Training parameters
-    num_episodes = 1000
+    num_episodes = 10000 
     eval_interval = 100
     
     print("Starting training...")
@@ -330,21 +336,21 @@ def main():
     # Evaluate the trained agent
     print("\nEvaluating trained agent...")
     eval_metrics = evaluate(env, agent, num_episodes=100, max_steps=500)
-    # Evaluate the random agent
+    # Evaluate the random agent with matched episode lengths
     print("\nEvaluating random agent...")
-    random_agent = RandomAgent(env.action_space)
-    random_metrics = evaluate(env, random_agent, num_episodes=100, max_steps=500)
+    random_agent = RandomAgent(env)
+    random_metrics = evaluate(env, random_agent, num_episodes=100, max_steps=500, episode_lengths_override=eval_metrics['episode_lengths'])
     
     # Plot evaluation results
     plot_cumulative_reward(eval_metrics, results_dir)
     plot_location_stockouts(eval_metrics, results_dir)
     # Plot histogram comparing average rewards
     plt.figure(figsize=(8, 6))
-    plt.hist(eval_metrics['rewards'], bins=20, alpha=0.7, label='Q-learning Agent')
+    plt.hist(eval_metrics['rewards'], bins=20, alpha=0.7, label='Double Q-learning Agent')
     plt.hist(random_metrics['rewards'], bins=20, alpha=0.7, label='Random Agent')
     plt.xlabel('Episode Reward')
     plt.ylabel('Frequency')
-    plt.title('Reward Distribution: Q-learning vs Random Agent')
+    plt.title('Reward Distribution: Double Q-learning vs Random Agent')
     plt.legend()
     plt.tight_layout()
     plt.savefig(os.path.join(results_dir, 'reward_histogram.png'))
@@ -357,20 +363,20 @@ def main():
     
     print(f"\nResults saved in {results_dir}")
     print("\nEvaluation Results:")
-    print(f"Average Reward (Q-learning): {np.mean(eval_metrics['rewards']):.2f}")
+    print(f"Average Reward (Double Q-learning): {np.mean(eval_metrics['rewards']):.2f}")
     print(f"Average Reward (Random): {np.mean(random_metrics['rewards']):.2f}")
-    print(f"Average Service Level (Q-learning): {np.mean(eval_metrics['service_levels']):.1f}%")
+    print(f"Average Service Level (Double Q-learning): {np.mean(eval_metrics['service_levels']):.1f}%")
     print(f"Average Service Level (Random): {np.mean(random_metrics['service_levels']):.1f}%")
-    print(f"Average Episode Length (Q-learning): {np.mean(eval_metrics['episode_lengths']):.2f}")
+    print(f"Average Episode Length (Double Q-learning): {np.mean(eval_metrics['episode_lengths']):.2f}")
     print(f"Average Episode Length (Random): {np.mean(random_metrics['episode_lengths']):.2f}")
     print("\nAverage Stockouts by Location:")
     for location in ['Location_1', 'Location_2', 'Location_3', 'Retail']:
         avg_stockouts_q = np.mean(eval_metrics['location_stockouts'][location])
-        avg_stockouts_r = np.mean(random_metrics['location_stockouts'][location])
-        print(f"{location} (Q-learning): {avg_stockouts_q:.2f}")
-        print(f"{location} (Random): {avg_stockouts_r:.2f}")
+        avg_stockouts_random = np.mean(random_metrics['location_stockouts'][location])
+        print(f"{location} (Double Q-learning): {avg_stockouts_q:.2f}")
+        print(f"{location} (Random): {avg_stockouts_random:.2f}")
     if 'transportation_costs' in eval_metrics and len(eval_metrics['transportation_costs']) > 0:
-        print(f"\nAverage Transportation Cost per Episode (Q-learning): {np.mean(eval_metrics['transportation_costs']):.2f}")
+        print(f"\nAverage Transportation Cost per Episode (Double Q-learning): {np.mean(eval_metrics['transportation_costs']):.2f}")
     if 'transportation_costs' in random_metrics and len(random_metrics['transportation_costs']) > 0:
         print(f"Average Transportation Cost per Episode (Random): {np.mean(random_metrics['transportation_costs']):.2f}")
 
@@ -385,7 +391,7 @@ def main():
         np.mean(eval_metrics['location_stockouts']['Retail']),
         np.mean(eval_metrics['episode_lengths'])
     ]
-    r_values = [
+    random_values = [
         np.mean(random_metrics['service_levels']),
         np.mean(random_metrics['transportation_costs']) if 'transportation_costs' in random_metrics else 0,
         np.mean(random_metrics['location_stockouts']['Location_1']),
@@ -397,30 +403,74 @@ def main():
     x = np.arange(len(labels))
     width = 0.35
     plt.figure(figsize=(12, 6))
-    plt.bar(x - width/2, q_values, width, label='Q-learning')
-    plt.bar(x + width/2, r_values, width, label='Random')
+    plt.bar(x - width/2, q_values, width, label='Double Q-learning')
+    plt.bar(x + width/2, random_values, width, label='Random')
     plt.xticks(x, labels)
     plt.ylabel('Value')
-    plt.title('Comparison of Key Metrics: Q-learning vs Random Agent')
+    plt.title('Comparison of Key Metrics: Double Q-learning vs Random Agent')
     plt.legend()
     plt.tight_layout()
     plt.savefig(os.path.join(results_dir, 'metrics_comparison_bar.png'))
     plt.close()
 
     # Save trained agent
-    agent.save(os.path.join(results_dir, 'trained_agent.npy'))
+    agent.save(os.path.join(results_dir, 'trained_agent'))
 
-    # Export Q-table to CSV
-    q_table_path = os.path.join(results_dir, 'trained_agent.npy')
+    # Export Q-table to CSV (use Q-table A for export)
+    q_table_path = os.path.join(results_dir, 'trained_agent_A.pkl')
     csv_path = os.path.join(results_dir, 'q_table.csv')
-    export_q_table_to_csv(q_table_path, csv_path)
-    print(f"Q-table exported to {csv_path}")
+    # Load Q-table A from pickle for export
+    with open(q_table_path, 'rb') as f:
+        q_table_A = pickle.load(f)
+    with open(csv_path, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(['State', 'Action', 'Q-value'])
+        for key, value in q_table_A.items():
+            if isinstance(key, (tuple, list)) and len(key) == 2:
+                state, action = key
+            else:
+                state, action = key, ""
+            writer.writerow([str(state), str(action), value])
+    print(f"Q-table (A) exported to {csv_path}")
 
     # Print average reward per step for both agents
     avg_reward_per_step_q = np.mean(eval_metrics['rewards']) / np.mean(eval_metrics['episode_lengths'])
     avg_reward_per_step_random = np.mean(random_metrics['rewards']) / np.mean(random_metrics['episode_lengths'])
-    print(f"Average Reward per Step (Q-learning): {avg_reward_per_step_q:.2f}")
+    print(f"Average Reward per Step (Double Q-learning): {avg_reward_per_step_q:.2f}")
     print(f"Average Reward per Step (Random): {avg_reward_per_step_random:.2f}")
+
+    # --- BENCHMARK: Fixed Demand ---
+    print("\nRunning fixed demand benchmark...")
+    benchmark_config = env.config.copy()
+    benchmark_config['use_fixed_demand'] = True
+    benchmark_config['fixed_daily_demand'] = 5  # You can adjust this value
+    env_benchmark = InventoryEnvironment(config=benchmark_config)
+    agent_benchmark = TDAgent(
+        action_space=env_benchmark.action_space,
+        discount_factor=0.99
+    )
+    rewards_bench, metrics_bench, episode_lengths_bench, td_errors_bench = train(
+        env_benchmark,
+        agent_benchmark,
+        num_episodes=5000,
+        max_steps=500
+    )
+    print("\nEvaluating benchmark agent...")
+    eval_metrics_bench = evaluate(env_benchmark, agent_benchmark, num_episodes=100, max_steps=500)
+    print("\nBenchmark Results (Fixed Demand):")
+    print(f"Average Reward: {np.mean(eval_metrics_bench['rewards']):.2f}")
+    print(f"Average Service Level: {np.mean(eval_metrics_bench['service_levels']):.1f}%")
+    print(f"Average Episode Length: {np.mean(eval_metrics_bench['episode_lengths']):.2f}")
+    print("Average Stockouts by Location:")
+    for location in ['Location_1', 'Location_2', 'Location_3', 'Retail']:
+        avg_stockouts = np.mean(eval_metrics_bench['location_stockouts'][location])
+        print(f"{location}: {avg_stockouts:.2f}")
+    # Save benchmark results
+    eval_metrics_bench_serializable = convert_to_serializable(eval_metrics_bench)
+    with open(os.path.join(results_dir, 'benchmark_evaluation_metrics.json'), 'w') as f:
+        json.dump(eval_metrics_bench_serializable, f, indent=4)
+
+    print("Environment initialized with constant lead times per SKU.")
 
 if __name__ == "__main__":
     # Set random seed for reproducibility
