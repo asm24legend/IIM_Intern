@@ -329,7 +329,7 @@ def main():
     )
     
     # Training parameters
-    num_episodes = 10000 
+    num_episodes = 50000
     eval_interval = 100
     
     print("Starting training for Double Q-learning agent...")

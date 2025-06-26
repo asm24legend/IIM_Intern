@@ -32,9 +32,7 @@ class SKUData:
     unit_value: float = 0.0  # Per-unit value for revenue/cost analysis
     # Add seasonal demand parameters
     base_demand: float = 0  # Base demand level
-    amplitude: float = 0    # Amplitude of seasonal variation
-    frequency: float = 0    # Frequency of seasonal cycle
-    phase: float = 0        # Phase shift of seasonal pattern
+    
     last_decision_time: float = 0  # New field to track when last decision was made
     # Service level tracking
     total_demand: float = 0.0  # Total historical demand
@@ -256,15 +254,10 @@ class InventoryEnvironment(gym.Env):
         total_demand = 0
         current_time = self.config['current_time']
         
-        # Project demand over lead time period excluding seasonal demand
-        #for t in range(sku.lead_time_days):
-           # self.config['current_time'] = current_time + t
-           # daily_demand = self.generate_seasonal_demand(sku, current_time + t)
-           # total_demand += daily_demand
         
         # Reset time step
         self.config['current_time'] = current_time
-        return total_demand * 1.40  # Add 20% safety factor
+        return total_demand * 1.20  # Add 20% safety factor
 
     def calculate_eoq(self, sku_id: str) -> int:
         """Calculate Economic Order Quantity for a specific SKU"""
@@ -275,16 +268,17 @@ class InventoryEnvironment(gym.Env):
         return int(np.sqrt((2 * D * K) / H))
 
     def calculate_rop(self, sku_id: str) -> int:
-        """Calculate Reorder Point considering lead time demand"""
+        """Calculate Reorder Point considering lead time demand and recent period demand"""
         sku = self.skus[sku_id]
         lead_time_demand = self.calculate_lead_time_demand(sku_id)
-        
-        # Adjust ROP if lead time demand exceeds forecasted demand
-        if lead_time_demand > sku.forecasted_demand:
-            safety_stock_adjustment = int(0.2* lead_time_demand)  # Increase safety stock by 20%
-            return int(lead_time_demand + safety_stock_adjustment)
-        
-        return int(lead_time_demand + sku.safety_stock)
+        # Use the most recent period demand (previous_demand)
+        recent_period_demand = getattr(sku, 'previous_demand', 0)
+        base_rop = lead_time_demand + recent_period_demand + sku.safety_stock
+        # If either lead time demand or recent period demand is unusually high, increase safety stock
+        if lead_time_demand > sku.forecasted_demand or recent_period_demand > sku.forecasted_demand:
+            safety_stock_adjustment = int(0.2 * (lead_time_demand + recent_period_demand))
+            return int(lead_time_demand + recent_period_demand + safety_stock_adjustment)
+        return int(base_rop)
 
     def select_best_supplier(self, sku_id: str) -> str:
         """Select the best supplier based on load and reliability"""

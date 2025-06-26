@@ -51,11 +51,11 @@ class DoubleDQNAgent:
             epsilon: Initial exploration rate
         """
         self.action_space = action_space
-        self.learning_rate = learning_rate
+        self.learning_rate = 0.00005
         self.discount_factor = discount_factor
         self.epsilon = epsilon
         self.epsilon_min = 0.01
-        self.epsilon_decay = 0.999
+        self.epsilon_decay = 0.99995
         
         # Neural network parameters
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -70,8 +70,8 @@ class DoubleDQNAgent:
         self.optimizer = None
         
         # Experience replay
-        self.memory = ReplayBuffer(10000)
-        self.batch_size = 32
+        self.memory = ReplayBuffer(100000)
+        self.batch_size = 128
         
         # Training parameters
         self.update_target_every = 100
@@ -184,6 +184,9 @@ class DoubleDQNAgent:
         reward_batch = torch.FloatTensor(batch.reward).to(self.device)  # (batch,)
         next_state_batch = torch.FloatTensor(np.array(batch.next_state)).to(self.device)  # (batch, state_dim)
         done_batch = torch.BoolTensor(batch.done).to(self.device)  # (batch,)
+        
+        # Normalize rewards
+        reward_batch = (reward_batch - reward_batch.mean()) / (reward_batch.std() + 1e-8)
         
         # Compute current Q values and next Q values
         if self.q_network is None:
