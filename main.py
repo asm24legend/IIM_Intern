@@ -1,6 +1,7 @@
 import numpy as np
 from inventory_env import InventoryEnvironment
 from q_learning_agent import TDAgent
+from dqn_agent import DoubleDQNAgent
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import json
@@ -58,6 +59,7 @@ def plot_training_progress(rewards, td_errors, metrics, save_dir):
     ax4.legend()
     
     plt.tight_layout()
+    os.makedirs(save_dir, exist_ok=True)
     plt.savefig(os.path.join(save_dir, 'training_progress.png'))
     plt.close()
 
@@ -239,6 +241,7 @@ def plot_cumulative_reward(eval_metrics, save_dir):
     plt.title('Cumulative Reward Over Episodes')
     plt.legend()
     plt.tight_layout()
+    os.makedirs(save_dir, exist_ok=True)
     plt.savefig(os.path.join(save_dir, 'cumulative_reward.png'))
     plt.close()
 
@@ -257,6 +260,7 @@ def plot_location_stockouts(eval_metrics, save_dir):
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
+    os.makedirs(save_dir, exist_ok=True)
     plt.savefig(os.path.join(save_dir, 'location_stockouts.png'))
     plt.close()
 
@@ -309,9 +313,17 @@ def main():
     results_dir = f'results_{timestamp}'
     os.makedirs(results_dir, exist_ok=True)
     
-    # Initialize environment and agent
+    # Initialize environment and agents
     env = InventoryEnvironment()
-    agent = TDAgent(
+    
+    # Double Q-learning agent
+    td_agent = TDAgent(
+        action_space=env.action_space,
+        discount_factor=0.99
+    )
+    
+    # Double DQN agent
+    dqn_agent = DoubleDQNAgent(
         action_space=env.action_space,
         discount_factor=0.99
     )
@@ -320,77 +332,129 @@ def main():
     num_episodes = 10000 
     eval_interval = 100
     
-    print("Starting training...")
+    print("Starting training for Double Q-learning agent...")
     print(f"Training will run for {num_episodes} episodes")
     
-    rewards_history, metrics_history, episode_lengths, td_errors = train(
+    # Train Double Q-learning agent
+    td_rewards_history, td_metrics_history, td_episode_lengths, td_errors = train(
         env, 
-        agent,
+        td_agent,
         num_episodes=num_episodes,
         max_steps=500
     )
     
-    # Plot training progress
-    plot_training_progress(rewards_history, td_errors, metrics_history, results_dir)
+    # Plot training progress for Double Q-learning
+    plot_training_progress(td_rewards_history, td_errors, td_metrics_history, results_dir)
     
-    # Evaluate the trained agent
-    print("\nEvaluating trained agent...")
-    eval_metrics = evaluate(env, agent, num_episodes=100, max_steps=500)
-    # Evaluate the random agent with matched episode lengths
+    print("\nStarting training for Double DQN agent...")
+    print(f"Training will run for {num_episodes} episodes")
+    
+    # Train Double DQN agent
+    dqn_rewards_history, dqn_metrics_history, dqn_episode_lengths, dqn_errors = train(
+        env, 
+        dqn_agent,
+        num_episodes=num_episodes,
+        max_steps=500
+    )
+    
+    # Plot training progress for Double DQN
+    os.makedirs(results_dir, exist_ok=True)
+    plot_training_progress(dqn_rewards_history, dqn_errors, dqn_metrics_history, 
+                          os.path.join(results_dir, 'dqn_training_progress.png'))
+    
+    # Evaluate all agents
+    print("\nEvaluating Double Q-learning agent...")
+    td_eval_metrics = evaluate(env, td_agent, num_episodes=100, max_steps=500)
+    
+    print("\nEvaluating Double DQN agent...")
+    dqn_eval_metrics = evaluate(env, dqn_agent, num_episodes=100, max_steps=500)
+    
     print("\nEvaluating random agent...")
     random_agent = RandomAgent(env)
-    random_metrics = evaluate(env, random_agent, num_episodes=100, max_steps=500, episode_lengths_override=eval_metrics['episode_lengths'])
+    random_metrics = evaluate(env, random_agent, num_episodes=100, max_steps=500, 
+                             episode_lengths_override=td_eval_metrics['episode_lengths'])
     
     # Plot evaluation results
-    plot_cumulative_reward(eval_metrics, results_dir)
-    plot_location_stockouts(eval_metrics, results_dir)
-    # Plot histogram comparing average rewards
-    plt.figure(figsize=(8, 6))
-    plt.hist(eval_metrics['rewards'], bins=20, alpha=0.7, label='Double Q-learning Agent')
+    plot_cumulative_reward(td_eval_metrics, results_dir)
+    plot_location_stockouts(td_eval_metrics, results_dir)
+    
+    # Plot histogram comparing average rewards for all three agents
+    plt.figure(figsize=(10, 6))
+    plt.hist(td_eval_metrics['rewards'], bins=20, alpha=0.7, label='Double Q-learning Agent')
+    plt.hist(dqn_eval_metrics['rewards'], bins=20, alpha=0.7, label='Double DQN Agent')
     plt.hist(random_metrics['rewards'], bins=20, alpha=0.7, label='Random Agent')
     plt.xlabel('Episode Reward')
     plt.ylabel('Frequency')
-    plt.title('Reward Distribution: Double Q-learning vs Random Agent')
+    plt.title('Reward Distribution: Double Q-learning vs Double DQN vs Random Agent')
     plt.legend()
     plt.tight_layout()
+    os.makedirs(results_dir, exist_ok=True)
     plt.savefig(os.path.join(results_dir, 'reward_histogram.png'))
     plt.close()
     
     # Save evaluation metrics
-    eval_metrics_serializable = convert_to_serializable(eval_metrics)
-    with open(os.path.join(results_dir, 'evaluation_metrics.json'), 'w') as f:
-        json.dump(eval_metrics_serializable, f, indent=4)
+    td_eval_metrics_serializable = convert_to_serializable(td_eval_metrics)
+    dqn_eval_metrics_serializable = convert_to_serializable(dqn_eval_metrics)
+    random_metrics_serializable = convert_to_serializable(random_metrics)
+    
+    with open(os.path.join(results_dir, 'td_evaluation_metrics.json'), 'w') as f:
+        json.dump(td_eval_metrics_serializable, f, indent=4)
+    with open(os.path.join(results_dir, 'dqn_evaluation_metrics.json'), 'w') as f:
+        json.dump(dqn_eval_metrics_serializable, f, indent=4)
+    with open(os.path.join(results_dir, 'random_evaluation_metrics.json'), 'w') as f:
+        json.dump(random_metrics_serializable, f, indent=4)
     
     print(f"\nResults saved in {results_dir}")
     print("\nEvaluation Results:")
-    print(f"Average Reward (Double Q-learning): {np.mean(eval_metrics['rewards']):.2f}")
+    print(f"Average Reward (Double Q-learning): {np.mean(td_eval_metrics['rewards']):.2f}")
+    print(f"Average Reward (Double DQN): {np.mean(dqn_eval_metrics['rewards']):.2f}")
     print(f"Average Reward (Random): {np.mean(random_metrics['rewards']):.2f}")
-    print(f"Average Service Level (Double Q-learning): {np.mean(eval_metrics['service_levels']):.1f}%")
+    print(f"Average Service Level (Double Q-learning): {np.mean(td_eval_metrics['service_levels']):.1f}%")
+    print(f"Average Service Level (Double DQN): {np.mean(dqn_eval_metrics['service_levels']):.1f}%")
     print(f"Average Service Level (Random): {np.mean(random_metrics['service_levels']):.1f}%")
-    print(f"Average Episode Length (Double Q-learning): {np.mean(eval_metrics['episode_lengths']):.2f}")
+    print(f"Average Episode Length (Double Q-learning): {np.mean(td_eval_metrics['episode_lengths']):.2f}")
+    print(f"Average Episode Length (Double DQN): {np.mean(dqn_eval_metrics['episode_lengths']):.2f}")
     print(f"Average Episode Length (Random): {np.mean(random_metrics['episode_lengths']):.2f}")
+    
     print("\nAverage Stockouts by Location:")
     for location in ['Location_1', 'Location_2', 'Location_3', 'Retail']:
-        avg_stockouts_q = np.mean(eval_metrics['location_stockouts'][location])
+        avg_stockouts_td = np.mean(td_eval_metrics['location_stockouts'][location])
+        avg_stockouts_dqn = np.mean(dqn_eval_metrics['location_stockouts'][location])
         avg_stockouts_random = np.mean(random_metrics['location_stockouts'][location])
-        print(f"{location} (Double Q-learning): {avg_stockouts_q:.2f}")
+        print(f"{location} (Double Q-learning): {avg_stockouts_td:.2f}")
+        print(f"{location} (Double DQN): {avg_stockouts_dqn:.2f}")
         print(f"{location} (Random): {avg_stockouts_random:.2f}")
-    if 'transportation_costs' in eval_metrics and len(eval_metrics['transportation_costs']) > 0:
-        print(f"\nAverage Transportation Cost per Episode (Double Q-learning): {np.mean(eval_metrics['transportation_costs']):.2f}")
+    
+    if 'transportation_costs' in td_eval_metrics and len(td_eval_metrics['transportation_costs']) > 0:
+        print(f"\nAverage Transportation Cost per Episode (Double Q-learning): {np.mean(td_eval_metrics['transportation_costs']):.2f}")
+    if 'transportation_costs' in dqn_eval_metrics and len(dqn_eval_metrics['transportation_costs']) > 0:
+        print(f"Average Transportation Cost per Episode (Double DQN): {np.mean(dqn_eval_metrics['transportation_costs']):.2f}")
     if 'transportation_costs' in random_metrics and len(random_metrics['transportation_costs']) > 0:
         print(f"Average Transportation Cost per Episode (Random): {np.mean(random_metrics['transportation_costs']):.2f}")
 
-    # Plot bar chart comparing metrics
+    # Plot bar chart comparing metrics for all three agents
     labels = ['Service Level', 'Transp. Cost', 'Stockouts L1', 'Stockouts L2', 'Stockouts L3', 'Stockouts Retail', 'Ep. Length']
-    q_values = [
-        np.mean(eval_metrics['service_levels']),
-        np.mean(eval_metrics['transportation_costs']) if 'transportation_costs' in eval_metrics else 0,
-        np.mean(eval_metrics['location_stockouts']['Location_1']),
-        np.mean(eval_metrics['location_stockouts']['Location_2']),
-        np.mean(eval_metrics['location_stockouts']['Location_3']),
-        np.mean(eval_metrics['location_stockouts']['Retail']),
-        np.mean(eval_metrics['episode_lengths'])
+    
+    td_values = [
+        np.mean(td_eval_metrics['service_levels']),
+        np.mean(td_eval_metrics['transportation_costs']) if 'transportation_costs' in td_eval_metrics else 0,
+        np.mean(td_eval_metrics['location_stockouts']['Location_1']),
+        np.mean(td_eval_metrics['location_stockouts']['Location_2']),
+        np.mean(td_eval_metrics['location_stockouts']['Location_3']),
+        np.mean(td_eval_metrics['location_stockouts']['Retail']),
+        np.mean(td_eval_metrics['episode_lengths'])
     ]
+    
+    dqn_values = [
+        np.mean(dqn_eval_metrics['service_levels']),
+        np.mean(dqn_eval_metrics['transportation_costs']) if 'transportation_costs' in dqn_eval_metrics else 0,
+        np.mean(dqn_eval_metrics['location_stockouts']['Location_1']),
+        np.mean(dqn_eval_metrics['location_stockouts']['Location_2']),
+        np.mean(dqn_eval_metrics['location_stockouts']['Location_3']),
+        np.mean(dqn_eval_metrics['location_stockouts']['Retail']),
+        np.mean(dqn_eval_metrics['episode_lengths'])
+    ]
+    
     random_values = [
         np.mean(random_metrics['service_levels']),
         np.mean(random_metrics['transportation_costs']) if 'transportation_costs' in random_metrics else 0,
@@ -400,25 +464,29 @@ def main():
         np.mean(random_metrics['location_stockouts']['Retail']),
         np.mean(random_metrics['episode_lengths'])
     ]
+    
     x = np.arange(len(labels))
-    width = 0.35
-    plt.figure(figsize=(12, 6))
-    plt.bar(x - width/2, q_values, width, label='Double Q-learning')
-    plt.bar(x + width/2, random_values, width, label='Random')
+    width = 0.25
+    plt.figure(figsize=(15, 6))
+    plt.bar(x - width, td_values, width, label='Double Q-learning')
+    plt.bar(x, dqn_values, width, label='Double DQN')
+    plt.bar(x + width, random_values, width, label='Random')
     plt.xticks(x, labels)
     plt.ylabel('Value')
-    plt.title('Comparison of Key Metrics: Double Q-learning vs Random Agent')
+    plt.title('Comparison of Key Metrics: Double Q-learning vs Double DQN vs Random Agent')
     plt.legend()
     plt.tight_layout()
+    os.makedirs(results_dir, exist_ok=True)
     plt.savefig(os.path.join(results_dir, 'metrics_comparison_bar.png'))
     plt.close()
 
-    # Save trained agent
-    agent.save(os.path.join(results_dir, 'trained_agent'))
+    # Save trained agents
+    td_agent.save(os.path.join(results_dir, 'trained_td_agent'))
+    dqn_agent.save(os.path.join(results_dir, 'trained_dqn_agent'))
 
     # Export Q-table to CSV (use Q-table A for export)
-    q_table_path = os.path.join(results_dir, 'trained_agent_A.pkl')
-    csv_path = os.path.join(results_dir, 'q_table.csv')
+    q_table_path = os.path.join(results_dir, 'trained_td_agent_A.pkl')
+    csv_path = os.path.join(results_dir, 'td_q_table.csv')
     # Load Q-table A from pickle for export
     with open(q_table_path, 'rb') as f:
         q_table_A = pickle.load(f)
@@ -433,10 +501,12 @@ def main():
             writer.writerow([str(state), str(action), value])
     print(f"Q-table (A) exported to {csv_path}")
 
-    # Print average reward per step for both agents
-    avg_reward_per_step_q = np.mean(eval_metrics['rewards']) / np.mean(eval_metrics['episode_lengths'])
+    # Print average reward per step for all agents
+    avg_reward_per_step_td = np.mean(td_eval_metrics['rewards']) / np.mean(td_eval_metrics['episode_lengths'])
+    avg_reward_per_step_dqn = np.mean(dqn_eval_metrics['rewards']) / np.mean(dqn_eval_metrics['episode_lengths'])
     avg_reward_per_step_random = np.mean(random_metrics['rewards']) / np.mean(random_metrics['episode_lengths'])
-    print(f"Average Reward per Step (Double Q-learning): {avg_reward_per_step_q:.2f}")
+    print(f"Average Reward per Step (Double Q-learning): {avg_reward_per_step_td:.2f}")
+    print(f"Average Reward per Step (Double DQN): {avg_reward_per_step_dqn:.2f}")
     print(f"Average Reward per Step (Random): {avg_reward_per_step_random:.2f}")
 
     # --- BENCHMARK: Fixed Demand ---
