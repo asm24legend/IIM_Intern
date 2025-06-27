@@ -296,22 +296,7 @@ class InventoryEnvironment(gym.Env):
         
         return best_supplier
 
-    def adjust_delivery_date(self, sku_id: str, current_demand: float):
-        """Adjust delivery date based on demand changes"""
-        sku = self.skus[sku_id]
-        if sku.open_pos > 0:
-            demand_change = current_demand - sku.previous_demand
-            
-            if demand_change > sku.eoq:  # Significant increase in demand
-                # Advance delivery date
-                current_date = sku.next_delivery_date
-                new_date = current_date - timedelta(days=2)
-                self.skus[sku_id].next_delivery_date = new_date
-            elif demand_change < -sku.eoq:  # Significant decrease in demand
-                # Delay delivery date
-                current_date = sku.next_delivery_date
-                new_date = current_date + timedelta(days=2)
-                self.skus[sku_id].next_delivery_date = new_date
+
 
     def calculate_reward(self, sku_id: str, stockout: int, current_stock: int, 
                            daily_demand: float, current_lead_time: int, previous_lead_time: int) -> float:
@@ -321,6 +306,8 @@ class InventoryEnvironment(gym.Env):
         2. Location-specific demand fulfillment rewards
         3. Inventory level penalties to maintain efficiency
         4. Lead time reduction rewards
+        5. Heavy penalty for retail stockouts
+        6. Penalty for service level below 95%
         """
         reward = 0.0
         sku = self.skus[sku_id]
@@ -334,9 +321,9 @@ class InventoryEnvironment(gym.Env):
                 reward -= 40 * stockout
             elif sku.inventory_location == 'Location_3':
                 reward -= 30 * stockout
-            # Stronger retail penalty
+            # Much stronger retail penalty
             if sku.retail_stock <= 0:
-                reward -= 200 * stockout
+                reward -= 1000 * stockout  # Increased penalty for retail stockout
         else:
             # Lower reward for fulfillment
             if sku.inventory_location == 'Location_1':
@@ -357,6 +344,12 @@ class InventoryEnvironment(gym.Env):
         # Small reward for optimal inventory level
         if sku.safety_stock <= current_stock <= self.calculate_eoq(sku_id):
             reward += 50
+        
+        # Service level penalty: enforce minimum 95%
+        if sku.total_demand > 0:
+            service_level = sku.fulfilled_demand / sku.total_demand
+            if service_level < 0.95:
+                reward -= 1000 * (0.95 - service_level)  # Large penalty for falling below 95%
         
         return reward
 

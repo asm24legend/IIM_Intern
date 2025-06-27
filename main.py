@@ -329,7 +329,7 @@ def main():
     )
     
     # Training parameters
-    num_episodes = 50000
+    num_episodes = 5000
     eval_interval = 100
     
     print("Starting training for Double Q-learning agent...")
@@ -406,13 +406,13 @@ def main():
     
     print(f"\nResults saved in {results_dir}")
     print("\nEvaluation Results:")
-    print(f"Average Reward (Double Q-learning): {np.mean(td_eval_metrics['rewards']):.2f}")
+    print(f"Average Reward (Q-learning): {np.mean(td_eval_metrics['rewards']):.2f}")
     print(f"Average Reward (Double DQN): {np.mean(dqn_eval_metrics['rewards']):.2f}")
     print(f"Average Reward (Random): {np.mean(random_metrics['rewards']):.2f}")
-    print(f"Average Service Level (Double Q-learning): {np.mean(td_eval_metrics['service_levels']):.1f}%")
+    print(f"Average Service Level (Q-learning): {np.mean(td_eval_metrics['service_levels']):.1f}%")
     print(f"Average Service Level (Double DQN): {np.mean(dqn_eval_metrics['service_levels']):.1f}%")
     print(f"Average Service Level (Random): {np.mean(random_metrics['service_levels']):.1f}%")
-    print(f"Average Episode Length (Double Q-learning): {np.mean(td_eval_metrics['episode_lengths']):.2f}")
+    print(f"Average Episode Length (Q-learning): {np.mean(td_eval_metrics['episode_lengths']):.2f}")
     print(f"Average Episode Length (Double DQN): {np.mean(dqn_eval_metrics['episode_lengths']):.2f}")
     print(f"Average Episode Length (Random): {np.mean(random_metrics['episode_lengths']):.2f}")
     
