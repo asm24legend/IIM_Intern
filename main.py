@@ -487,20 +487,7 @@ def main():
     # Export Q-table to CSV (use Q-table A for export)
     q_table_path = os.path.join(results_dir, 'trained_td_agent_A.pkl')
     csv_path = os.path.join(results_dir, 'td_q_table.csv')
-    # Load Q-table A from pickle for export
-    with open(q_table_path, 'rb') as f:
-        q_table_A = pickle.load(f)
-    with open(csv_path, 'w', newline='') as csvfile:
-        writer = csv.writer(csvfile)
-        writer.writerow(['State', 'Action', 'Q-value'])
-        for key, value in q_table_A.items():
-            if isinstance(key, (tuple, list)) and len(key) == 2:
-                state, action = key
-            else:
-                state, action = key, ""
-            writer.writerow([str(state), str(action), value])
-    print(f"Q-table (A) exported to {csv_path}")
-
+   
     # Print average reward per step for all agents
     avg_reward_per_step_td = np.mean(td_eval_metrics['rewards']) / np.mean(td_eval_metrics['episode_lengths'])
     avg_reward_per_step_dqn = np.mean(dqn_eval_metrics['rewards']) / np.mean(dqn_eval_metrics['episode_lengths'])

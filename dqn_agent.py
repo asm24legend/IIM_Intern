@@ -51,11 +51,11 @@ class DoubleDQNAgent:
             epsilon: Initial exploration rate
         """
         self.action_space = action_space
-        self.learning_rate = 0.00005
+        self.learning_rate = 0.0001  # Reduced from 0.00005 for more stable learning
         self.discount_factor = discount_factor
         self.epsilon = epsilon
-        self.epsilon_min = 0.01
-        self.epsilon_decay = 0.99995
+        self.epsilon_min = 0.05  # Increased from 0.01 for more exploration
+        self.epsilon_decay = 0.9995  # Slower decay from 0.99995
         
         # Neural network parameters
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -69,12 +69,13 @@ class DoubleDQNAgent:
         self.target_network = None
         self.optimizer = None
         
-        # Experience replay
-        self.memory = ReplayBuffer(100000)
-        self.batch_size = 128
+        # Experience replay (increased for better stability)
+        self.memory = ReplayBuffer(200000)  # Increased from 100000
+        self.batch_size = 256  # Increased from 128
         
-        # Training parameters
-        self.update_target_every = 100
+        # Training parameters (soft target updates)
+        self.update_target_every = 1  # Update every step for soft updates
+        self.tau = 0.005  # Soft update parameter
         self.steps = 0
         
         # TD error history for monitoring learning
@@ -221,12 +222,16 @@ class DoubleDQNAgent:
             raise ValueError("Optimizer is not initialized.")
         self.optimizer.zero_grad()
         loss.backward()
+        
+        # Gradient clipping for stability
+        torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
+        
         self.optimizer.step()
         
-        # Update target network periodically
+        # Soft target network updates (more stable than hard updates)
         self.steps += 1
         if self.steps % self.update_target_every == 0:
-            self.target_network.load_state_dict(self.q_network.state_dict())
+            self.soft_update()
         
         # Decay epsilon
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
@@ -236,6 +241,12 @@ class DoubleDQNAgent:
         self.td_errors.append(mean_td_error)
         
         return mean_td_error
+    
+    def soft_update(self):
+        """Soft update target network using Polyak averaging"""
+        if self.q_network is not None and self.target_network is not None:
+            for target_param, param in zip(self.target_network.parameters(), self.q_network.parameters()):
+                target_param.data.copy_(self.tau * param.data + (1.0 - self.tau) * target_param.data)
     
     def _action_to_indices(self, action, num_skus):
         """Convert continuous action to discrete indices for neural network"""

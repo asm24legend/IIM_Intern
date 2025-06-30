@@ -39,7 +39,6 @@ class SKUData:
     fulfilled_demand: float = 0.0  # Total fulfilled demand
     stockout_occasions: int = 0  # Number of stockout events
     replenishment_cycles: int = 0  # Number of replenishment cycles
-    backorder: int = 0  # Only used for Type_B
     alpha: float = 2.0  # Shape parameter for gamma demand
     beta: float = 2.0   # Scale parameter for gamma demand
 
@@ -191,7 +190,7 @@ class InventoryEnvironment(gym.Env):
                 'lead_time_range': (5, 10),
                 'current_load': 0,
                 'reliability': 0.95,
-                'products': ['Type_A', 'Type_B']
+                'products': ['Type_A']
             },
             'Supplier_Y': {
                 'lead_time_range': (7, 12),
@@ -306,50 +305,54 @@ class InventoryEnvironment(gym.Env):
         2. Location-specific demand fulfillment rewards
         3. Inventory level penalties to maintain efficiency
         4. Lead time reduction rewards
-        5. Heavy penalty for retail stockouts
-        6. Penalty for service level below 95%
         """
         reward = 0.0
         sku = self.skus[sku_id]
         location = self.inventory_locations[sku.inventory_location]
         
-        # Location-specific stockout penalties
+        # Location-specific stockout penalties (increased for stronger signal)
         if stockout > 0:
             if sku.inventory_location == 'Location_1':
-                reward -= 50 * stockout
+                reward -= 100 * stockout  # Increased from 50
             elif sku.inventory_location == 'Location_2':
-                reward -= 40 * stockout
+                reward -= 80 * stockout   # Increased from 40
             elif sku.inventory_location == 'Location_3':
-                reward -= 30 * stockout
-            # Much stronger retail penalty
+                reward -= 60 * stockout   # Increased from 30
+            # Stronger retail penalty
             if sku.retail_stock <= 0:
-                reward -= 1000 * stockout  # Increased penalty for retail stockout
+                reward -= 1500 * stockout  # Increased from 1000
         else:
-            # Lower reward for fulfillment
+            # Higher rewards for fulfillment (increased positive reinforcement)
             if sku.inventory_location == 'Location_1':
-                reward += 50
+                reward += 100  # Increased from 50
             elif sku.inventory_location == 'Location_2':
-                reward += 40
+                reward += 80   # Increased from 40
             elif sku.inventory_location == 'Location_3':
-                reward += 30
+                reward += 60   # Increased from 30
             if sku.retail_stock > 0:
-                reward += 50
+                reward += 100  # Increased from 50
         
-        # Penalty for excess inventory
-        if current_stock > self.calculate_eoq(sku_id):
-            reward -= (current_stock - self.calculate_eoq(sku_id)) * 0.1
-        # Stronger penalty for being below safety stock
+        # Inventory level management (adjusted for better balance)
+        eoq = self.calculate_eoq(sku_id)
+        # Penalty for excess inventory (reduced to be less harsh)
+        if current_stock > eoq:
+            excess = current_stock - eoq
+            reward -= excess * 0.05  # Reduced from 0.1
+        # Penalty for being below safety stock (increased for critical situations)
         elif current_stock < sku.safety_stock:
-            reward -= (sku.safety_stock - current_stock) * 1.0
-        # Small reward for optimal inventory level
-        if sku.safety_stock <= current_stock <= self.calculate_eoq(sku_id):
-            reward += 50
+            deficit = sku.safety_stock - current_stock
+            reward -= deficit * 2.0  # Increased from 1.0
+        # Higher reward for optimal inventory level
+        if sku.safety_stock <= current_stock <= eoq:
+            reward += 100  # Increased from 50
         
-        # Service level penalty: enforce minimum 95%
+        # Additional reward for maintaining good service level
         if sku.total_demand > 0:
             service_level = sku.fulfilled_demand / sku.total_demand
-            if service_level < 0.95:
-                reward -= 1000 * (0.95 - service_level)  # Large penalty for falling below 95%
+            if service_level >= 0.95:
+                reward += 200  # Bonus for maintaining 95%+ service level
+            elif service_level >= 0.90:
+                reward += 100  # Smaller bonus for 90%+ service level
         
         return reward
 
@@ -363,11 +366,11 @@ class InventoryEnvironment(gym.Env):
         return np.array(state, dtype=np.int32)
 
     def _replenish_retail(self, sku_id: str, demand: int):
-        """Replenish retail stock from any available warehouse location."""
+        """Replenish retail stock from the primary warehouse location only."""
         sku = self.skus[sku_id]
         total_replenished = 0
         
-        # First try to replenish from the primary location
+        # Only replenish from the primary location
         primary_location = self.inventory_locations[sku.inventory_location]
         if sku.current_stock > 0:
             replenishment = min(demand, sku.current_stock)
@@ -377,24 +380,7 @@ class InventoryEnvironment(gym.Env):
             total_replenished += replenishment
             demand -= replenishment
         
-        # If still need more, try other locations
-        if demand > 0:
-            for location_name, location in self.inventory_locations.items():
-                if location_name != sku.inventory_location:  # Skip primary location
-                    if sku_id in location.current_stock and location.current_stock[sku_id] > 0:
-                        # Calculate how much we can take from this location
-                        available = location.current_stock[sku_id]
-                        replenishment = min(demand, available)
-                        
-                        # Update stock levels
-                        sku.retail_stock += replenishment
-                        location.current_stock[sku_id] -= replenishment
-                        total_replenished += replenishment
-                        demand -= replenishment
-                        
-                        if demand <= 0:
-                            break
-        
+        # No fallback to other locations
         return total_replenished
 
     def step(self, action):
@@ -440,42 +426,17 @@ class InventoryEnvironment(gym.Env):
             # Update total demand
             sku.total_demand += period_demand
             
-            # --- Backorder logic for Type_B ---
-            if sku_id == 'Type_B':
-                # Fulfill any existing backorders first
-                fulfill_from_stock = min(sku.retail_stock, sku.backorder)
-                sku.retail_stock -= int(fulfill_from_stock)
-                sku.backorder -= int(fulfill_from_stock)
-                # Now fulfill current period demand
-                available_for_demand = sku.retail_stock
-                fulfilled_retail_demand = min(period_demand, available_for_demand)
-                retail_shortfall = period_demand - fulfilled_retail_demand
-                sku.retail_stock -= int(fulfilled_retail_demand)
-                # Any unfulfilled demand becomes new backorder
-                sku.backorder += int(retail_shortfall)
-                # For metrics: do not count backorders as stockouts
-                retail_stockout = 0
-                # Calculate warehouse-level stockout (if retail + warehouse cannot fulfill demand)
-                total_available = available_for_demand + sku.current_stock
-                total_stockout = max(0, period_demand - total_available)
-                warehouse_stockout = max(0, total_stockout)
-                # Update service level metrics
-                sku.fulfilled_demand += fulfilled_retail_demand
-                if warehouse_stockout > 0:
-                    sku.stockout_occasions += 1
-                stockouts[sku_id] = warehouse_stockout
-            else:
-                # Handle retail level transactions (original logic)
-                fulfilled_retail_demand = min(period_demand, sku.retail_stock)
-                retail_stockout = period_demand - fulfilled_retail_demand
-                total_available = sku.retail_stock + sku.current_stock
-                total_stockout = max(0, period_demand - total_available)
-                warehouse_stockout = max(0, total_stockout)
-                sku.fulfilled_demand += fulfilled_retail_demand
-                if retail_stockout > 0 or warehouse_stockout > 0:
-                    sku.stockout_occasions += 1
-                stockouts[sku_id] = retail_stockout + warehouse_stockout
-                sku.retail_stock -= int(fulfilled_retail_demand)
+            # --- Demand fulfillment logic for all SKUs (retail only, no backorders) ---
+            fulfilled_current_demand = min(period_demand, sku.retail_stock)
+            sku.retail_stock -= int(fulfilled_current_demand)
+            # Any unfulfilled current demand is a stockout
+            stockout = int(period_demand - fulfilled_current_demand)
+            if stockout > 0:
+                sku.stockout_occasions += 1
+            # Update service level metrics
+            sku.fulfilled_demand += fulfilled_current_demand
+            stockouts[sku_id] = stockout
+            backorder_penalty = 0  # No backorder penalty
             
             # Calculate service levels
             if sku.total_demand > 0:
@@ -497,15 +458,17 @@ class InventoryEnvironment(gym.Env):
             self.skus[sku_id].previous_demand = period_demand
             self.skus[sku_id].last_decision_time = current_time
             
-            # Calculate rewards (subtract transportation cost)
+            # Calculate rewards (subtract transportation cost and backorder penalty)
+            stockout_for_reward = stockouts[sku_id]
+            
             rewards[i] = self.calculate_reward(
                 sku_id,
-                int(retail_stockout + warehouse_stockout),
+                int(stockout_for_reward),
                 self.skus[sku_id].current_stock,
                 period_demand / time_deltas[sku_id],
                 self._get_current_lead_time(sku_id),
                 sku.lead_time_days
-            ) - transportation_cost
+            ) - transportation_cost - backorder_penalty
             transportation_costs[sku_id] = transportation_cost
         
         # Update supplier metrics
@@ -536,6 +499,13 @@ class InventoryEnvironment(gym.Env):
         if any(sku.retail_stock <= 0 for sku in self.skus.values()):
             done = True
             rewards -= 20  # Terminal state penalty for retail stockout
+        
+        # After all SKUs processed, before returning
+        # Enforce minimum service level of 95%
+        avg_service_level = np.mean(list(service_levels.values()))
+        if avg_service_level < 0.95:
+            penalty = -1000 * (0.98 - avg_service_level)  # Large penalty for dropping below 95%
+            rewards += penalty
         
         return self._get_state(), np.sum(rewards), done, info
     
