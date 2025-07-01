@@ -63,16 +63,25 @@ def plot_training_progress(rewards, td_errors, metrics, save_dir):
     plt.savefig(os.path.join(save_dir, 'training_progress.png'))
     plt.close()
 
+def plot_moving_average(data, window, title, ylabel, save_path):
+    """Plot moving average for a given data series."""
+    moving_avg = np.convolve(data, np.ones(window)/window, mode='valid')
+    plt.figure(figsize=(10, 6))
+    plt.plot(moving_avg)
+    plt.title(title)
+    plt.xlabel('Episode')
+    plt.ylabel(ylabel)
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+
 def train(env, agent, num_episodes=100, max_steps=500):
     """Train the agent"""
     rewards_history = []
     td_errors = []
     metrics_history = []
     episode_lengths = []
-    
-    # Progress bar
     pbar = tqdm(range(num_episodes), desc="Training Progress")
-    
     for episode in pbar:
         state = env.reset()
         done = False
@@ -90,74 +99,48 @@ def train(env, agent, num_episodes=100, max_steps=500):
             'warehouse_levels': {},
             'retail_levels': {},
             'supplier_reliability': {},
-            'transportation_cost': 0.0  # Track total transportation cost for this episode
+            'transportation_cost': 0.0
         }
-        
         while not done and episode_steps < max_steps:
-            # Get action from agent
+            # Get action from agent (now only order quantities)
             action = agent.get_action(state, env)
-            
             # Take action in environment
             next_state, reward, done, info = env.step(action)
-            
             # Update agent
             td_error = agent.learn(state, action, reward, next_state)
-            
             # Update metrics
             episode_reward += reward
             episode_steps += 1
-            
-            # Track stockouts by location
             for sku_id, stockout in info['stockouts'].items():
                 sku = env.skus[sku_id]
                 location = sku.inventory_location
                 episode_metrics['location_stockouts'][location] += stockout
-                # Track retail stockouts separately
                 if sku.retail_stock <= 0:
                     episode_metrics['location_stockouts']['Retail'] += stockout
-            
-            # Track inventory levels
             for sku_id in env.skus:
                 if sku_id not in episode_metrics['warehouse_levels']:
                     episode_metrics['warehouse_levels'][sku_id] = []
                 if sku_id not in episode_metrics['retail_levels']:
                     episode_metrics['retail_levels'][sku_id] = []
-                
-                episode_metrics['warehouse_levels'][sku_id].append(
-                    int(info['warehouse_stock'][sku_id])
-                )
-                episode_metrics['retail_levels'][sku_id].append(
-                    int(info['retail_stock'][sku_id])
-                )
-            
-            # Track supplier reliability
+                episode_metrics['warehouse_levels'][sku_id].append(int(info['warehouse_stock'][sku_id]))
+                episode_metrics['retail_levels'][sku_id].append(int(info['retail_stock'][sku_id]))
             episode_metrics['supplier_reliability'] = {
                 k: float(v) for k, v in info['supplier_reliability'].items()
             }
-            
-            # Track transportation cost
             episode_metrics['transportation_cost'] += sum(info.get('transportation_costs', {}).values())
-            
             state = next_state
-        
-        # Get final service level from environment info
         episode_metrics['service_level'] = float(np.mean([
             service_level * 100 for service_level in info['service_levels'].values()
         ]))
-        
-        # Store episode results
         rewards_history.append(float(episode_reward))
         td_errors.append(float(agent.get_average_td_error()))
         metrics_history.append(episode_metrics)
         episode_lengths.append(int(episode_steps))
-        
-        # Update progress bar with location-specific stockouts
         if (episode + 1) % 10 == 0:
             avg_reward = float(np.mean(rewards_history[-10:]))
             avg_service_level = float(np.mean([
                 m['service_level'] for m in metrics_history[-10:]
             ]))
-            # Calculate average stockouts by location
             avg_stockouts = {
                 location: np.mean([m['location_stockouts'][location] for m in metrics_history[-10:]])
                 for location in ['Location_1', 'Location_2', 'Location_3', 'Retail']
@@ -170,7 +153,6 @@ def train(env, agent, num_episodes=100, max_steps=500):
                 'L3 Stockouts': f'{avg_stockouts["Location_3"]:.1f}',
                 'Retail Stockouts': f'{avg_stockouts["Retail"]:.1f}'
             })
-    
     return rewards_history, metrics_history, episode_lengths, td_errors
 
 def evaluate(env, agent, num_episodes=100, max_steps=500, episode_lengths_override=None):
@@ -185,9 +167,8 @@ def evaluate(env, agent, num_episodes=100, max_steps=500, episode_lengths_overri
             'Retail': []
         },
         'episode_lengths': [],
-        'transportation_costs': []  # Track transportation cost per episode
+        'transportation_costs': []
     }
-    
     for episode in range(num_episodes):
         state = env.reset()
         done = False
@@ -199,7 +180,6 @@ def evaluate(env, agent, num_episodes=100, max_steps=500, episode_lengths_overri
             'Location_3': 0,
             'Retail': 0
         }
-        # Determine the max steps for this episode
         this_max_steps = max_steps
         if episode_lengths_override is not None and episode < len(episode_lengths_override):
             this_max_steps = episode_lengths_override[episode]
@@ -329,7 +309,7 @@ def main():
     )
     
     # Training parameters
-    num_episodes = 5000
+    num_episodes = 50000
     eval_interval = 100
     
     print("Starting training for Double Q-learning agent...")
@@ -361,6 +341,23 @@ def main():
     os.makedirs(results_dir, exist_ok=True)
     plot_training_progress(dqn_rewards_history, dqn_errors, dqn_metrics_history, 
                           os.path.join(results_dir, 'dqn_training_progress.png'))
+    
+    # Plot moving average of TD error
+    plot_moving_average(
+        dqn_errors,
+        window=100,
+        title='DQN TD Error (Moving Average, window=100)',
+        ylabel='TD Error',
+        save_path=os.path.join(results_dir, 'dqn_td_error_moving_avg.png')
+    )
+    # Plot moving average of reward
+    plot_moving_average(
+        dqn_rewards_history,
+        window=100,
+        title='DQN Reward (Moving Average, window=100)',
+        ylabel='Reward',
+        save_path=os.path.join(results_dir, 'dqn_reward_moving_avg.png')
+    )
     
     # Evaluate all agents
     print("\nEvaluating Double Q-learning agent...")

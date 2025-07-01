@@ -4,47 +4,45 @@ import random
 import pickle
 
 class TDAgent:
-    def __init__(self, action_space, learning_rate=0.05, discount_factor=0.98, epsilon=1.0):
+    def __init__(self, action_space, discount_factor=0.99, learning_rate=0.1, epsilon=1.0, epsilon_min=0.05, epsilon_decay=0.9997):
         """
         Initialize Q-Learning agent
         
         Args:
             action_space: Gym space defining the action space
-            learning_rate: Learning rate for Q-value updates
             discount_factor: Discount factor for future rewards
+            learning_rate: Learning rate for Q-value updates
             epsilon: Initial exploration rate
+            epsilon_min: Minimum exploration rate
+            epsilon_decay: Exploration rate decay
         """
         self.action_space = action_space
-        self.learning_rate = learning_rate
         self.discount_factor = discount_factor
+        self.learning_rate = learning_rate
         self.epsilon = epsilon
-        self.epsilon_min = 0.01
-        self.epsilon_decay = 0.999
-        
-        # Initialize single Q-table
-        self.q_table = defaultdict(lambda: np.array([]))
-        
-        # TD error history for monitoring learning
-        self.td_errors = []
+        self.epsilon_min = epsilon_min
+        self.epsilon_decay = epsilon_decay
         
         # Number of discrete levels for order quantities and lead time reductions
         self.num_order_levels = 20
-        self.num_lead_time_levels = 4  # 0 to max_lead_time_reduction
         
         # Define actual discrete values for order quantities and lead time reductions
         # These depend on the environment's action space (max_inventory, max_lead_time_reduction)
         # Will be initialized more precisely when environment is available.
         self.order_level_values = None
-        self.lead_time_reduction_values = None
+        self.q_table = {}
+        
+        # TD error history for monitoring learning
+        self.td_errors = []
     
     def discretize_state(self, state):
         """
         Convert continuous state values to discrete for Q-table lookup.
         State is now just an array of inventory levels.
         """
-        # Discretize inventory levels into bins of 25 units
-        discrete_state = tuple(int(s / 25) for s in state)
-        return discrete_state
+        max_inventory = 1000
+        normalized_state = tuple((np.array(state) / max_inventory).round(3))
+        return normalized_state
     
     def get_action(self, state, env, greedy=False):
         """
@@ -54,35 +52,23 @@ class TDAgent:
         num_skus = len(env.skus)
         if self.order_level_values is None:
             self.order_level_values = np.linspace(0, env.action_space.high[0], self.num_order_levels, dtype=np.int32)
-        if self.lead_time_reduction_values is None:
-            self.lead_time_reduction_values = np.arange(0, self.num_lead_time_levels, dtype=np.int32)
-        expected_q_table_size = num_skus * self.num_order_levels + num_skus * self.num_lead_time_levels
-        discrete_state = self.discretize_state(state)
-        if len(self.q_table[discrete_state]) != expected_q_table_size:
-            self.q_table[discrete_state] = np.zeros(expected_q_table_size)
-        # Only use epsilon-greedy if not greedy mode
+        current_state = self.discretize_state(state)
+        # Per-SKU action selection: each SKU's action is chosen independently
+        if current_state not in self.q_table:
+            self.q_table[current_state] = np.zeros(num_skus * self.num_order_levels)
         if not greedy and np.random.random() < self.epsilon:
             random_order_levels = np.random.randint(0, self.num_order_levels, num_skus)
-            random_lead_time_levels = np.random.randint(0, self.num_lead_time_levels, num_skus)
             order_quantities = self.order_level_values[random_order_levels]
-            lead_time_reductions = self.lead_time_reduction_values[random_lead_time_levels]
-            return np.concatenate([order_quantities, lead_time_reductions])
-        # Use Q-table for action selection
-        q_values = self.q_table[discrete_state]
+            return order_quantities
+        q_values = self.q_table[current_state]
         best_orders = np.zeros(num_skus)
-        best_reductions = np.zeros(num_skus)
         for i in range(num_skus):
             order_q_start_idx = i * self.num_order_levels
             order_q_end_idx = order_q_start_idx + self.num_order_levels
             sku_order_q_values = q_values[order_q_start_idx:order_q_end_idx]
-            lead_time_q_start_idx = num_skus * self.num_order_levels + i * self.num_lead_time_levels
-            lead_time_q_end_idx = lead_time_q_start_idx + self.num_lead_time_levels
-            sku_lead_time_q_values = q_values[lead_time_q_start_idx:lead_time_q_end_idx]
             best_order_level_idx = np.argmax(sku_order_q_values)
-            best_lead_time_level_idx = np.argmax(sku_lead_time_q_values)
             best_orders[i] = self.order_level_values[best_order_level_idx]
-            best_reductions[i] = self.lead_time_reduction_values[best_lead_time_level_idx]
-        return np.concatenate([best_orders, best_reductions])
+        return best_orders
     
     def learn(self, state, action, reward, next_state):
         """
@@ -90,50 +76,26 @@ class TDAgent:
         """
         current_state = self.discretize_state(state)
         next_state_discrete = self.discretize_state(next_state)
-        
-        # Ensure next_q_values are initialized if next_state is new
-        num_skus = len(state) // 2 # Assuming state is [warehouse_sku1, retail_sku1, ...]
-        expected_q_table_size = num_skus * self.num_order_levels + num_skus * self.num_lead_time_levels
-        
-        if len(self.q_table[next_state_discrete]) != expected_q_table_size:
-            self.q_table[next_state_discrete] = np.zeros(expected_q_table_size)
-        if len(self.q_table[current_state]) != expected_q_table_size:
-            self.q_table[current_state] = np.zeros(expected_q_table_size)
+        num_skus = len(action)
+        if current_state not in self.q_table:
+            self.q_table[current_state] = np.zeros(num_skus * self.num_order_levels)
+        if next_state_discrete not in self.q_table:
+            self.q_table[next_state_discrete] = np.zeros(num_skus * self.num_order_levels)
+        q_values = self.q_table[current_state]
         next_q_values = self.q_table[next_state_discrete]
-        current_q_values = self.q_table[current_state]
-        
-        # Identify the discrete levels that correspond to the continuous actions taken
-        num_skus_action = len(action) // 2 # Action is [order_qty_sku1,..., lead_time_red_sku1,...]
-        chosen_order_levels_indices = np.zeros(num_skus_action, dtype=np.int32)
-        chosen_lead_time_levels_indices = np.zeros(num_skus_action, dtype=np.int32)
-        for i in range(num_skus_action):
-            chosen_order_levels_indices[i] = np.argmin(np.abs(self.order_level_values - action[i]))
-            chosen_lead_time_levels_indices[i] = np.argmin(np.abs(self.lead_time_reduction_values - action[num_skus_action + i]))
         total_td_error = 0
-        for i in range(num_skus_action):
-            # Update Q-value for order quantity decision for this SKU
-            order_level_idx = chosen_order_levels_indices[i]
+        # Per-SKU Q-learning update: each SKU's Q-value is updated independently
+        for i in range(num_skus):
+            order_level_idx = np.argmin(np.abs(self.order_level_values - action[i]))
             q_idx_in_flat_array = i * self.num_order_levels + order_level_idx
-            # Standard Q-learning: max Q-value for next state
             next_q_order = next_q_values[i*self.num_order_levels : (i+1)*self.num_order_levels]
             max_next_q_order = np.max(next_q_order)
             td_target_order = reward + self.discount_factor * max_next_q_order
-            td_error_order = td_target_order - current_q_values[q_idx_in_flat_array]
-            self.q_table[current_state][q_idx_in_flat_array] += self.learning_rate * td_error_order
+            td_error_order = td_target_order - q_values[q_idx_in_flat_array]
+            q_values[q_idx_in_flat_array] += self.learning_rate * td_error_order
             total_td_error += td_error_order
-            # Update Q-value for lead time reduction decision for this SKU
-            lead_time_level_idx = chosen_lead_time_levels_indices[i]
-            q_idx_in_flat_array_lt = num_skus_action * self.num_order_levels + i * self.num_lead_time_levels + lead_time_level_idx
-            next_q_lead_time = next_q_values[num_skus_action * self.num_order_levels + i*self.num_lead_time_levels : num_skus_action * self.num_order_levels + (i+1)*self.num_lead_time_levels]
-            max_next_q_lead_time = np.max(next_q_lead_time)
-            td_target_lead_time = reward + self.discount_factor * max_next_q_lead_time
-            td_error_lead_time = td_target_lead_time - current_q_values[q_idx_in_flat_array_lt]
-            self.q_table[current_state][q_idx_in_flat_array_lt] += self.learning_rate * td_error_lead_time
-            total_td_error += td_error_lead_time
-        # Average TD error across all action components (2 actions per SKU)
-        avg_td_error = total_td_error / (2 * num_skus_action)
+        avg_td_error = total_td_error / num_skus
         self.td_errors.append(avg_td_error)
-        # Decay epsilon
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
         return avg_td_error
     
