@@ -6,22 +6,48 @@ import torch.nn.functional as F
 from collections import deque, namedtuple
 import random
 import pickle
+from scipy.stats import gamma
+import bisect
 
 # Define the experience replay buffer
 Experience = namedtuple('Experience', ('state', 'action', 'reward', 'next_state', 'done'))
 
-class ReplayBuffer:
-    def __init__(self, capacity):
-        self.buffer = deque(maxlen=capacity)
-    
-    def push(self, *args):
-        self.buffer.append(Experience(*args))
-    
-    def sample(self, batch_size):
-        batch = random.sample(self.buffer, batch_size)
-        batch = Experience(*zip(*batch))
-        return batch
-    
+# --- Prioritized Experience Replay Buffer ---
+class PrioritizedReplayBuffer:
+    def __init__(self, capacity, alpha=0.6):
+        self.capacity = capacity
+        self.alpha = alpha
+        self.buffer = []
+        self.priorities = []
+        self.pos = 0
+
+    def push(self, *args, td_error=None):
+        max_prio = max(self.priorities, default=1.0)
+        if len(self.buffer) < self.capacity:
+            self.buffer.append(Experience(*args))
+            self.priorities.append(max_prio)
+        else:
+            self.buffer[self.pos] = Experience(*args)
+            self.priorities[self.pos] = max_prio
+            self.pos = (self.pos + 1) % self.capacity
+
+    def sample(self, batch_size, beta=0.4):
+        if len(self.buffer) == 0:
+            return [], [], []
+        prios = np.array(self.priorities)
+        probs = prios ** self.alpha
+        probs /= probs.sum()
+        indices = np.random.choice(len(self.buffer), batch_size, p=probs)
+        samples = [self.buffer[idx] for idx in indices]
+        total = len(self.buffer)
+        weights = (total * probs[indices]) ** (-beta)
+        weights /= weights.max()
+        return samples, indices, torch.tensor(weights, dtype=torch.float32)
+
+    def update_priorities(self, indices, td_errors):
+        for idx, td_error in zip(indices, td_errors):
+            self.priorities[idx] = abs(td_error) + 1e-5
+
     def __len__(self):
         return len(self.buffer)
 
@@ -66,7 +92,7 @@ class DoubleDQNAgent:
         self.q_network = None
         self.target_network = None
         self.optimizer = None
-        self.memory = ReplayBuffer(500000)
+        self.memory = PrioritizedReplayBuffer(500000)
         self.batch_size = 128
         self.update_target_every = 10
         self.tau = 0.005
@@ -86,12 +112,25 @@ class DoubleDQNAgent:
         # Create optimizer
         self.optimizer = optim.Adam(self.q_network.parameters(), lr=self.learning_rate)
     
-    def discretize_state(self, state):
-        """Convert continuous state values to discrete for neural network input"""
-        # Normalize state values to [0, 1] range
-        # Assuming state contains inventory levels that can be normalized
-        max_inventory = 1000  # Adjust based on your environment
-        normalized_state = np.array(state) / max_inventory
+    def get_demand_stats(self, env):
+        """Return a vector of 90th percentile lead time demand for each SKU."""
+        demand_stats = []
+        for sku_id, sku in env.skus.items():
+            quantile = 0.9
+            shape = sku.alpha * sku.lead_time_days
+            scale = sku.beta
+            demand90 = gamma.ppf(quantile, a=shape, scale=scale)
+            demand_stats.append(demand90)
+        return np.array(demand_stats)
+
+    def discretize_state(self, state, env=None):
+        """Convert continuous state values to discrete for neural network input, including demand stats if env is provided."""
+        max_inventory = 1000
+        state_arr = np.array(state)
+        if env is not None:
+            demand_stats = self.get_demand_stats(env)
+            state_arr = np.concatenate([state_arr, demand_stats])
+        normalized_state = state_arr / max_inventory
         return normalized_state.astype(np.float32)
     
     def get_action(self, state, env, greedy=False):
@@ -102,13 +141,13 @@ class DoubleDQNAgent:
         if self.order_level_values is None:
             self.order_level_values = np.linspace(0, env.action_space.high[0], self.num_order_levels, dtype=np.int32)
         if self.q_network is None:
-            state_size = len(self.discretize_state(state))
+            state_size = len(self.discretize_state(state, env))
             self.initialize_networks(state_size, num_skus)
         if not greedy and np.random.random() < self.epsilon:
             random_order_levels = np.random.randint(0, self.num_order_levels, num_skus)
             order_quantities = self.order_level_values[random_order_levels]
             return order_quantities
-        discrete_state = self.discretize_state(state)
+        discrete_state = self.discretize_state(state, env)
         state_tensor = torch.FloatTensor(discrete_state).unsqueeze(0).to(self.device)
         if self.q_network is None:
             raise ValueError("Q-network is not initialized.")
@@ -127,24 +166,32 @@ class DoubleDQNAgent:
             best_orders[i] = self.order_level_values[best_order_level_idx]
         return best_orders
     
-    def learn(self, state, action, reward, next_state):
+    def learn(self, state, action, reward, next_state, env=None):
         """
         Update Q-values using Double DQN for multi-discrete actions
         """
-        discrete_state = self.discretize_state(state)
-        discrete_next_state = self.discretize_state(next_state)
+        discrete_state = self.discretize_state(state, env)
+        discrete_next_state = self.discretize_state(next_state, env)
         num_skus = len(state) // 2
         action_indices = self._action_to_indices(action, num_skus)
-        self.memory.push(discrete_state, action_indices, reward, discrete_next_state, False)
+        # Use max priority for new experience
+        self.memory.push(discrete_state, action_indices, reward, discrete_next_state, False, td_error=1.0)
         if len(self.memory) < self.batch_size:
             return 0.0
-        batch = self.memory.sample(self.batch_size)
+        beta = 0.4
+        samples, indices, weights = self.memory.sample(self.batch_size, beta=beta)
+        if not samples:
+            return 0.0
+        batch = Experience(*zip(*samples))
         state_batch = torch.FloatTensor(np.array(batch.state)).to(self.device)
         action_batch = torch.LongTensor(np.array(batch.action)).to(self.device)
         reward_batch = torch.FloatTensor(batch.reward).to(self.device)
         reward_batch = torch.clamp(reward_batch, -1000, 1000)
         next_state_batch = torch.FloatTensor(np.array(batch.next_state)).to(self.device)
         done_batch = torch.BoolTensor(batch.done).to(self.device)
+        if not isinstance(weights, torch.Tensor):
+            weights = torch.tensor(weights, dtype=torch.float32)
+        weights = weights.to(self.device)
         if self.q_network is None:
             raise ValueError("Q-network is not initialized.")
         if self.target_network is None:
@@ -166,9 +213,10 @@ class DoubleDQNAgent:
             next_actions = next_q_values[:, i].argmax(dim=0)
             next_q_selected = next_q_values_target[:, i][next_actions]
             target_q = reward_batch + (self.discount_factor * next_q_selected * (~done_batch).float())
-            component_loss = F.smooth_l1_loss(current_q_selected, target_q)
+            td_error = (current_q_selected - target_q).detach().cpu().numpy()
+            component_loss = (F.smooth_l1_loss(current_q_selected, target_q, reduction='none') * weights).mean()
             loss = loss + component_loss
-            td_errors.append((current_q_selected - target_q).detach().cpu().numpy())
+            td_errors.append(td_error)
         loss = loss / n_action_components
         if self.optimizer is None:
             raise ValueError("Optimizer is not initialized.")
@@ -180,7 +228,9 @@ class DoubleDQNAgent:
         if self.steps % self.update_target_every == 0:
             self.soft_update()
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
-        mean_td_error = np.mean([np.abs(e).mean() for e in td_errors])
+        flat_td_errors = np.abs(np.concatenate(td_errors))
+        self.memory.update_priorities(indices, flat_td_errors)
+        mean_td_error = np.mean(flat_td_errors)
         self.td_errors.append(mean_td_error)
         return mean_td_error
     

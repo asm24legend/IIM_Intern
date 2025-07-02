@@ -1,7 +1,7 @@
 import numpy as np
 import gym
 from gym import spaces
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -41,6 +41,9 @@ class SKUData:
     replenishment_cycles: int = 0  # Number of replenishment cycles
     alpha: float = 2.0  # Shape parameter for gamma demand
     beta: float = 2.0   # Scale parameter for gamma demand
+    retail_replenishment_lead_time: int = 1  # Lead time (days) for warehouse to retail
+    retail_replenishment_queue: list = field(default_factory=list)  # List of (arrival_time, amount) tuples
+    shelf_life_days: int = 30  # Default shelf life in days
 
 @dataclass
 class InventoryLocation:
@@ -101,88 +104,98 @@ class InventoryEnvironment(gym.Env):
             'Type_C': 60
         }
 
+        # Set quantile for forecasted demand
+        demand_quantile = 0.9  # 90th percentile
+        # Import gamma only when needed for quantile calculation
+        from scipy.stats import gamma
         # Initialize SKUs with seasonal demand parameters
         base_date = datetime.now()
+        # For each SKU, set forecasted_demand to the 90th percentile of the gamma distribution
+        alpha_A, beta_A = 15.0, 2.5   # Increased alpha, decreased beta
+        alpha_B, beta_B = 30.0, 5.0   # Increased alpha, decreased beta
+        alpha_C, beta_C = 60.0, 12.5  # Increased alpha, decreased beta
+        forecasted_A = float(gamma.ppf(demand_quantile, a=alpha_A, scale=beta_A))
+        forecasted_B = float(gamma.ppf(demand_quantile, a=alpha_B, scale=beta_B))
+        forecasted_C = float(gamma.ppf(demand_quantile, a=alpha_C, scale=beta_C))
         self.skus = {
             'Type_A': SKUData(
                 sku='Type_A',
                 description='Product Type A',
-                current_stock=100,
-                reorder_point=30,
+                current_stock=120,
+                reorder_point=40,
                 safety_stock=20,
                 lead_time_days=3,
-                forecasted_demand=50,
+                alpha=alpha_A,
+                beta=beta_A,
+                forecasted_demand=forecasted_A,  # 90th percentile of gamma
                 eoq=20,
-                max_stock=150,
+                max_stock=170,
                 min_order_qty=10,
                 inventory_location='Location_1',
                 supplier='Supplier_X',
                 open_pos=0,
                 last_order_date=base_date,
                 next_delivery_date=base_date + timedelta(days=3),
-                retail_stock=30,
+                retail_stock=40,
                 base_demand=50,
-                stockout_cost_multiplier=2.0, # High penalty for stockout
+                stockout_cost_multiplier=2.0,
                 abc_class='A',
-                unit_value=1000.0,  # High value
-                #amplitude=150,
-                #frequency=2*np.pi/365,  # One year cycle
-                #phase=0,
+                unit_value=1000.0,
                 last_decision_time=0.0
             ),
             'Type_B': SKUData(
                 sku='Type_B',
                 description='Product Type B',
-                current_stock=300,
-                reorder_point=100,
+                current_stock=350,
+                reorder_point=120,
                 safety_stock=60,
                 lead_time_days=7,
-                forecasted_demand=200,
+                alpha=alpha_B,
+                beta=beta_B,
+                forecasted_demand=forecasted_B,  # 90th percentile of gamma
                 eoq=60,
-                max_stock=400,
+                max_stock=450,
                 min_order_qty=40,
                 inventory_location='Location_2',
                 supplier='Supplier_Y',
                 open_pos=0,
                 last_order_date=base_date,
                 next_delivery_date=base_date + timedelta(days=7),
-                retail_stock=60,
+                retail_stock=75,
                 base_demand=200,
-                stockout_cost_multiplier=1.0, # Moderate penalty
+                stockout_cost_multiplier=1.0,
                 abc_class='B',
-                unit_value=300.0,  # Moderate value
-                #amplitude=100,
-                #frequency=2*np.pi/182.5,  # Six month cycle
-                #phase=np.pi/2,
+                unit_value=300.0,
                 last_decision_time=0.0
             ),
             'Type_C': SKUData(
                 sku='Type_C',
                 description='Product Type C',
-                current_stock=800,
-                reorder_point=300,
+                current_stock=900,
+                reorder_point=350,
                 safety_stock=50,
-                lead_time_days=10,
-                forecasted_demand=1000,
-                eoq=300,
-                max_stock=1200,
+                lead_time_days=1,
+                alpha=alpha_C,
+                beta=beta_C,
+                forecasted_demand=forecasted_C,  # 90th percentile of gamma
+                eoq=600,
+                max_stock=3000,
                 min_order_qty=100,
                 inventory_location='Location_3',
                 supplier='Supplier_Z',
                 open_pos=0,
                 last_order_date=base_date,
-                next_delivery_date=base_date + timedelta(days=10),
-                retail_stock=150,
+                next_delivery_date=base_date + timedelta(days=1),
+                retail_stock=180,
                 base_demand=1000,
-                stockout_cost_multiplier=0.5, # Low penalty for stockout
+                stockout_cost_multiplier=0.5,
                 abc_class='C',
-                unit_value=50.0,  # Low value, high demand
-                #amplitude=80,
-                #frequency=2*np.pi/91.25,  # Three month cycle
-                #phase=np.pi/4,
+                unit_value=50.0,
+                shelf_life_days=6,
                 last_decision_time=0.0
             )
         }
+        # NOTE: forecasted_demand is now set to the 90th percentile (quantile=0.9) of the gamma distribution for each SKU.
         
         # Initialize suppliers with their capabilities and products
         self.suppliers = {
@@ -267,35 +280,15 @@ class InventoryEnvironment(gym.Env):
         return int(np.sqrt((2 * D * K) / H))
 
     def calculate_rop(self, sku_id: str) -> int:
-        """Calculate Reorder Point considering lead time demand and recent period demand"""
+        """Calculate Reorder Point as a high percentile of the gamma distribution for demand during lead time."""
+        from scipy.stats import gamma
         sku = self.skus[sku_id]
-        lead_time_demand = self.calculate_lead_time_demand(sku_id)
-        # Use the most recent period demand (previous_demand)
-        recent_period_demand = getattr(sku, 'previous_demand', 0)
-        base_rop = lead_time_demand + recent_period_demand + sku.safety_stock
-        # If either lead time demand or recent period demand is unusually high, increase safety stock
-        if lead_time_demand > sku.forecasted_demand or recent_period_demand > sku.forecasted_demand:
-            safety_stock_adjustment = int(0.2 * (lead_time_demand + recent_period_demand))
-            return int(lead_time_demand + recent_period_demand + safety_stock_adjustment)
-        return int(base_rop)
-
-    def select_best_supplier(self, sku_id: str) -> str:
-        """Select the best supplier based on load and reliability"""
-        sku = self.skus[sku_id]
-        best_supplier = sku.supplier
-        min_load = float('inf')
-        
-        for supplier_id, supplier in self.suppliers.items():
-            if sku_id in supplier['products']:
-                # Consider both load and reliability
-                effective_load = supplier['current_load'] / supplier['reliability']
-                if effective_load < min_load:
-                    min_load = effective_load
-                    best_supplier = supplier_id
-        
-        return best_supplier
-
-
+        quantile = 0.999 if sku_id == 'Type_C' else (0.98 if sku_id == 'Type_C' else 0.97)
+        shape = sku.alpha * sku.lead_time_days
+        scale = sku.beta
+        rop = gamma.ppf(quantile, a=shape, scale=scale)
+        # Add safety stock (already calculated for high service level)
+        return int(np.ceil(rop + sku.safety_stock))
 
     def calculate_reward(self, sku_id: str, stockout: int, current_stock: int, 
                            daily_demand: float, current_lead_time: int, previous_lead_time: int) -> float:
@@ -309,51 +302,49 @@ class InventoryEnvironment(gym.Env):
         reward = 0.0
         sku = self.skus[sku_id]
         location = self.inventory_locations[sku.inventory_location]
-        
-        # Location-specific stockout penalties (increased for stronger signal)
+        # Location-specific stockout penalties (further reduced)
         if stockout > 0:
             if sku.inventory_location == 'Location_1':
-                reward -= 100 * stockout  # Increased from 50
+                reward -= 25 * stockout  # Was 50
             elif sku.inventory_location == 'Location_2':
-                reward -= 80 * stockout   # Increased from 40
+                reward -= 20 * stockout   # Was 40
             elif sku.inventory_location == 'Location_3':
-                reward -= 60 * stockout   # Increased from 30
-            # Stronger retail penalty
+                reward -= 15 * stockout   # Was 30
+            # Retail penalty further reduced
             if sku.retail_stock <= 0:
-                reward -= 1500 * stockout  # Increased from 1000
+                reward -= 375 * stockout  # Was 750
         else:
-            # Higher rewards for fulfillment (increased positive reinforcement)
+            # Higher rewards for fulfillment (further doubled)
             if sku.inventory_location == 'Location_1':
-                reward += 100  # Increased from 50
+                reward += 400  # Was 200
             elif sku.inventory_location == 'Location_2':
-                reward += 80   # Increased from 40
+                reward += 320   # Was 160
             elif sku.inventory_location == 'Location_3':
-                reward += 60   # Increased from 30
+                reward += 240   # Was 120
             if sku.retail_stock > 0:
-                reward += 100  # Increased from 50
-        
-        # Inventory level management (adjusted for better balance)
+                reward += 400  # Was 200
+        # Inventory level management (penalties further reduced, rewards further increased)
         eoq = self.calculate_eoq(sku_id)
-        # Penalty for excess inventory (reduced to be less harsh)
+        # Penalty for excess inventory (halved again)
         if current_stock > eoq:
             excess = current_stock - eoq
-            reward -= excess * 0.05  # Reduced from 0.1
-        # Penalty for being below safety stock (increased for critical situations)
+            reward -= excess * 0.0125  # Was 0.025
+        # Penalty for being below safety stock (halved again)
         elif current_stock < sku.safety_stock:
             deficit = sku.safety_stock - current_stock
-            reward -= deficit * 2.0  # Increased from 1.0
-        # Higher reward for optimal inventory level
+            reward -= deficit * 0.5  # Was 1.0
+        # Higher reward for optimal inventory level (further doubled)
         if sku.safety_stock <= current_stock <= eoq:
-            reward += 100  # Increased from 50
-        
-        # Additional reward for maintaining good service level
+            reward += 400  # Was 200
+        # Additional reward for maintaining good service level (further doubled)
         if sku.total_demand > 0:
             service_level = sku.fulfilled_demand / sku.total_demand
             if service_level >= 0.95:
-                reward += 200  # Bonus for maintaining 95%+ service level
+                reward += 800  # Was 400
             elif service_level >= 0.90:
-                reward += 100  # Smaller bonus for 90%+ service level
-        
+                reward += 400  # Was 200
+        # Add a minimum reward floor to prevent extreme negatives
+        reward = max(reward, -50)
         return reward
 
     def _get_state(self):
@@ -389,19 +380,31 @@ class InventoryEnvironment(gym.Env):
         supplier_loads = defaultdict(float)
         stockouts = {}
         service_levels = {}
-        transportation_costs = {}
         num_skus = len(self.skus)
-        # Parse action: [order_qty_warehouse_SKU1, ..., order_qty_warehouse_SKUn]
         order_qty_warehouse = action[:num_skus]
         current_time = self.config['current_time']
         time_deltas = {
             sku_id: max(self.config['min_decision_interval'], current_time - sku.last_decision_time)
             for sku_id, sku in self.skus.items()
         }
-        # Handle each SKU independently
+        # --- Process retail replenishment arrivals for each SKU independently ---
+        for sku_id, sku in self.skus.items():
+            if sku.retail_replenishment_queue is not None:
+                arrivals = [item for item in sku.retail_replenishment_queue if item[0] <= current_time]
+                sku.retail_replenishment_queue = [item for item in sku.retail_replenishment_queue if item[0] > current_time]
+                for arrival_time, amount in arrivals:
+                    # Only replenish from Location (warehouse) to Retail for this SKU
+                    actual_amount = min(amount, sku.current_stock)
+                    sku.retail_stock += actual_amount
+                    sku.current_stock -= actual_amount
+                    self.inventory_locations[sku.inventory_location].current_stock[sku_id] = sku.current_stock
+        # --- Handle each SKU independently: Supplier -> Location -> Retail ---
         for i, (sku_id, sku) in enumerate(self.skus.items()):
-            transportation_cost = 0
-            # Apply warehouse order for this SKU only
+            # Shelf life check: if shelf_life_days < lead_time_days, treat as stockout
+            shelf_life_stockout = 0
+            if sku.shelf_life_days < sku.lead_time_days:
+                shelf_life_stockout = 1
+            # --- Supplier to Location (warehouse) ---
             if order_qty_warehouse[i] > 0:
                 current_rop = self.calculate_rop(sku_id)
                 if sku.current_stock < current_rop and sku.current_stock < sku.max_stock:
@@ -411,35 +414,46 @@ class InventoryEnvironment(gym.Env):
                     if order_qty > 0:
                         sku.open_pos += order_qty
                         self.inventory_locations[sku.inventory_location].current_stock[sku_id] += 0  # No immediate stock
-            # Calculate demand for this SKU only
+            # --- Demand realization and fulfillment at Retail for this SKU ---
             period_demand = self.calculate_demand_for_period(
                 sku,
                 sku.last_decision_time,
                 current_time
             )
             sku.total_demand += period_demand
-            # Fulfill demand from retail stock for this SKU only
             fulfilled_current_demand = min(period_demand, sku.retail_stock)
             sku.retail_stock -= int(fulfilled_current_demand)
             stockout = int(period_demand - fulfilled_current_demand)
+            stockout += shelf_life_stockout
             if stockout > 0:
                 sku.stockout_occasions += 1
             sku.fulfilled_demand += fulfilled_current_demand
             stockouts[sku_id] = stockout
             backorder_penalty = 0
-            # Calculate service level for this SKU only
+            # --- Service level calculation for this SKU ---
             if sku.total_demand > 0:
                 service_levels[sku_id] = sku.fulfilled_demand / sku.total_demand
             else:
                 service_levels[sku_id] = 1.0
-            # Process warehouse level operations for this SKU only
+            # --- Supplier delivery to Location (warehouse) for this SKU ---
             if sku.open_pos > 0 and self._is_delivery_due(sku, current_time):
                 sku.replenishment_cycles += 1
                 sku.current_stock += sku.open_pos
                 self.inventory_locations[sku.inventory_location].current_stock[sku_id] += sku.open_pos
                 supplier_loads[sku.supplier] += sku.open_pos
-                transportation_cost = sku.open_pos * self.config['transportation_cost_per_unit']
                 sku.open_pos = 0
+            # --- Location to Retail replenishment trigger for this SKU ---
+            if sku_id == 'Type_C':
+                retail_threshold = max(1, int(1.0 * sku.base_demand))
+                target_retail = max(1, int(5.0 * sku.base_demand))
+            else:
+                retail_threshold = max(1, int(1.2 * sku.base_demand))
+                target_retail = max(1, int(2.2 * sku.base_demand))
+            if sku.retail_stock < retail_threshold:
+                replenish_amount = min(target_retail - sku.retail_stock, sku.current_stock)
+                if replenish_amount > 0:
+                    arrival_time = current_time + sku.retail_replenishment_lead_time
+                    sku.retail_replenishment_queue.append((arrival_time, replenish_amount))
             sku.previous_demand = period_demand
             sku.last_decision_time = current_time
             rewards[i] = self.calculate_reward(
@@ -449,8 +463,8 @@ class InventoryEnvironment(gym.Env):
                 period_demand / time_deltas[sku_id],
                 self._get_current_lead_time(sku_id),
                 sku.lead_time_days
-            ) - transportation_cost - backorder_penalty
-            transportation_costs[sku_id] = transportation_cost
+            ) - backorder_penalty
+        # --- All other logic remains per-SKU, no cross-SKU dependencies ---
         # Update supplier metrics (still per supplier, but only based on their own SKUs)
         for supplier_id, load in supplier_loads.items():
             self.suppliers[supplier_id]['current_load'] = min(1.0, load / 1000)
@@ -467,43 +481,66 @@ class InventoryEnvironment(gym.Env):
             'time_deltas': time_deltas,
             'current_time': current_time,
             'lead_times': {sku_id: sku.lead_time_days for sku_id, sku in self.skus.items()},
-            'transportation_costs': transportation_costs
         }
         self.config['current_time'] += self.config['min_decision_interval']
         done = False
         if any(sku.retail_stock <= 0 for sku in self.skus.values()):
             done = True
             rewards -= 20
+        # After reward calculation, adjust service level penalty (halved again)
         avg_service_level = np.mean(list(service_levels.values()))
         if avg_service_level < 0.95:
-            penalty = -1000 * (0.98 - avg_service_level)
+            penalty = -250 * (0.98 - avg_service_level)  # Was -500
             rewards += penalty
-        return self._get_state(), np.sum(rewards), done, info
+        # Ensure rewards are not NaN or inf, and clip total reward
+        total_reward = np.sum(rewards)
+        if not np.isfinite(total_reward):
+            total_reward = 0.0
+        total_reward = np.clip(total_reward, -1000, 2000)
+        return self._get_state(), total_reward, done, info
     
+    def calculate_dynamic_safety_stock(self, sku, z=None):
+        """Calculate safety stock dynamically based on demand variability and lead time."""
+        if z is None:
+            z = 4.0 if sku.sku == 'Type_C' else 2.5
+        L = sku.lead_time_days
+        alpha = sku.alpha
+        beta = sku.beta
+        std_lead_time_demand = np.sqrt(L * alpha * (beta ** 2))
+        return int(np.ceil(z * std_lead_time_demand))
+
     def reset(self):
         # Reset simulation time
         self.config['current_time'] = 0.0
-        
         # Reset SKUs to initial state
         base_date = datetime.now()
         for sku_id, sku in self.skus.items():
+            # For Type_C, set lead_time_days to 1 and shelf_life_days to lead_time_days + 5
+            if sku_id == 'Type_C':
+                self.skus[sku_id].lead_time_days = 1
+                self.skus[sku_id].shelf_life_days = self.skus[sku_id].lead_time_days + 5
+            # Dynamically recalculate safety stock
+            self.skus[sku_id].safety_stock = self.calculate_dynamic_safety_stock(sku)
             self.skus[sku_id].current_stock = sku.reorder_point
             self.skus[sku_id].open_pos = 0
-            self.skus[sku_id].retail_stock = int(sku.safety_stock * 1.5)
+            # For Type_C, set retail_stock to 5x safety stock; others unchanged
+            if sku_id == 'Type_C':
+                self.skus[sku_id].retail_stock = int(self.skus[sku_id].safety_stock * 5.0)
+            else:
+                self.skus[sku_id].retail_stock = int(self.skus[sku_id].safety_stock * 2.2)
             self.skus[sku_id].last_decision_time = 0.0
             self.skus[sku_id].last_order_date = base_date
-            self.skus[sku_id].next_delivery_date = base_date + timedelta(days=sku.lead_time_days)
+            self.skus[sku_id].next_delivery_date = base_date + timedelta(days=self.skus[sku_id].lead_time_days)
             # Reset service level metrics
             self.skus[sku_id].total_demand = 0.0
             self.skus[sku_id].fulfilled_demand = 0.0
             self.skus[sku_id].stockout_occasions = 0
             self.skus[sku_id].replenishment_cycles = 0
             self.skus[sku_id].previous_demand = 0.0
-        
+            self.skus[sku_id].retail_replenishment_queue = []
         # Reset supplier loads
         for supplier in self.suppliers.values():
             supplier['current_load'] = 0
-        
         return self._get_state()
     
     def _is_delivery_due(self, sku: SKUData, current_time: float) -> bool:

@@ -98,8 +98,7 @@ def train(env, agent, num_episodes=100, max_steps=500):
             'service_level': 0,
             'warehouse_levels': {},
             'retail_levels': {},
-            'supplier_reliability': {},
-            'transportation_cost': 0.0
+            'supplier_reliability': {}
         }
         while not done and episode_steps < max_steps:
             # Get action from agent (now only order quantities)
@@ -107,7 +106,7 @@ def train(env, agent, num_episodes=100, max_steps=500):
             # Take action in environment
             next_state, reward, done, info = env.step(action)
             # Update agent
-            td_error = agent.learn(state, action, reward, next_state)
+            td_error = agent.learn(state, action, reward, next_state, env)
             # Update metrics
             episode_reward += reward
             episode_steps += 1
@@ -127,7 +126,6 @@ def train(env, agent, num_episodes=100, max_steps=500):
             episode_metrics['supplier_reliability'] = {
                 k: float(v) for k, v in info['supplier_reliability'].items()
             }
-            episode_metrics['transportation_cost'] += sum(info.get('transportation_costs', {}).values())
             state = next_state
         episode_metrics['service_level'] = float(np.mean([
             service_level * 100 for service_level in info['service_levels'].values()
@@ -166,8 +164,7 @@ def evaluate(env, agent, num_episodes=100, max_steps=500, episode_lengths_overri
             'Location_3': [],
             'Retail': []
         },
-        'episode_lengths': [],
-        'transportation_costs': []
+        'episode_lengths': []
     }
     for episode in range(num_episodes):
         state = env.reset()
@@ -194,10 +191,6 @@ def evaluate(env, agent, num_episodes=100, max_steps=500, episode_lengths_overri
                 episode_stockouts[location] += stockout
                 if sku.retail_stock <= 0:
                     episode_stockouts['Retail'] += stockout
-            if 'transportation_costs' in info:
-                if len(eval_metrics['transportation_costs']) <= episode:
-                    eval_metrics['transportation_costs'].append(0.0)
-                eval_metrics['transportation_costs'][episode] += sum(info['transportation_costs'].values())
             state = next_state
         service_level = float(np.mean([
             service_level * 100 for service_level in info['service_levels'].values()
@@ -295,6 +288,9 @@ def main():
     
     # Initialize environment and agents
     env = InventoryEnvironment()
+    print("\n[INFO] Demand variability has been reduced for all SKUs (FMCG scenario).\n")
+    for sku_id, sku in env.skus.items():
+        print(f"SKU {sku_id}: alpha={sku.alpha}, beta={sku.beta}")
     
     # Double Q-learning agent
     td_agent = TDAgent(
@@ -309,7 +305,7 @@ def main():
     )
     
     # Training parameters
-    num_episodes = 50000
+    num_episodes = 5000
     eval_interval = 100
     
     print("Starting training for Double Q-learning agent...")
@@ -360,7 +356,7 @@ def main():
     )
     
     # Evaluate all agents
-    print("\nEvaluating Double Q-learning agent...")
+    print("\nEvaluating Q-learning agent...")
     td_eval_metrics = evaluate(env, td_agent, num_episodes=100, max_steps=500)
     
     print("\nEvaluating Double DQN agent...")
@@ -382,7 +378,7 @@ def main():
     plt.hist(random_metrics['rewards'], bins=20, alpha=0.7, label='Random Agent')
     plt.xlabel('Episode Reward')
     plt.ylabel('Frequency')
-    plt.title('Reward Distribution: Double Q-learning vs Double DQN vs Random Agent')
+    plt.title('Reward Distribution: Q-learning vs Double DQN vs Random Agent')
     plt.legend()
     plt.tight_layout()
     os.makedirs(results_dir, exist_ok=True)
@@ -418,23 +414,15 @@ def main():
         avg_stockouts_td = np.mean(td_eval_metrics['location_stockouts'][location])
         avg_stockouts_dqn = np.mean(dqn_eval_metrics['location_stockouts'][location])
         avg_stockouts_random = np.mean(random_metrics['location_stockouts'][location])
-        print(f"{location} (Double Q-learning): {avg_stockouts_td:.2f}")
+        print(f"{location} (Q-learning): {avg_stockouts_td:.2f}")
         print(f"{location} (Double DQN): {avg_stockouts_dqn:.2f}")
         print(f"{location} (Random): {avg_stockouts_random:.2f}")
-    
-    if 'transportation_costs' in td_eval_metrics and len(td_eval_metrics['transportation_costs']) > 0:
-        print(f"\nAverage Transportation Cost per Episode (Double Q-learning): {np.mean(td_eval_metrics['transportation_costs']):.2f}")
-    if 'transportation_costs' in dqn_eval_metrics and len(dqn_eval_metrics['transportation_costs']) > 0:
-        print(f"Average Transportation Cost per Episode (Double DQN): {np.mean(dqn_eval_metrics['transportation_costs']):.2f}")
-    if 'transportation_costs' in random_metrics and len(random_metrics['transportation_costs']) > 0:
-        print(f"Average Transportation Cost per Episode (Random): {np.mean(random_metrics['transportation_costs']):.2f}")
 
     # Plot bar chart comparing metrics for all three agents
-    labels = ['Service Level', 'Transp. Cost', 'Stockouts L1', 'Stockouts L2', 'Stockouts L3', 'Stockouts Retail', 'Ep. Length']
+    labels = ['Service Level', 'Stockouts L1', 'Stockouts L2', 'Stockouts L3', 'Stockouts Retail', 'Ep. Length']
     
     td_values = [
         np.mean(td_eval_metrics['service_levels']),
-        np.mean(td_eval_metrics['transportation_costs']) if 'transportation_costs' in td_eval_metrics else 0,
         np.mean(td_eval_metrics['location_stockouts']['Location_1']),
         np.mean(td_eval_metrics['location_stockouts']['Location_2']),
         np.mean(td_eval_metrics['location_stockouts']['Location_3']),
@@ -444,7 +432,6 @@ def main():
     
     dqn_values = [
         np.mean(dqn_eval_metrics['service_levels']),
-        np.mean(dqn_eval_metrics['transportation_costs']) if 'transportation_costs' in dqn_eval_metrics else 0,
         np.mean(dqn_eval_metrics['location_stockouts']['Location_1']),
         np.mean(dqn_eval_metrics['location_stockouts']['Location_2']),
         np.mean(dqn_eval_metrics['location_stockouts']['Location_3']),
@@ -454,7 +441,6 @@ def main():
     
     random_values = [
         np.mean(random_metrics['service_levels']),
-        np.mean(random_metrics['transportation_costs']) if 'transportation_costs' in random_metrics else 0,
         np.mean(random_metrics['location_stockouts']['Location_1']),
         np.mean(random_metrics['location_stockouts']['Location_2']),
         np.mean(random_metrics['location_stockouts']['Location_3']),
