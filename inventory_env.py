@@ -15,7 +15,6 @@ class SKUData:
     reorder_point: int
     safety_stock: int
     lead_time_days: int
-    forecasted_demand: float
     eoq: int
     max_stock: int
     min_order_qty: int
@@ -44,6 +43,8 @@ class SKUData:
     retail_replenishment_lead_time: int = 1  # Lead time (days) for warehouse to retail
     retail_replenishment_queue: list = field(default_factory=list)  # List of (arrival_time, amount) tuples
     shelf_life_days: int = 30  # Default shelf life in days
+    demand_history: list = field(default_factory=list)  # Rolling window of recent daily demand
+    demand_window: int = 30  # Number of days for rolling window
 
 @dataclass
 class InventoryLocation:
@@ -114,9 +115,6 @@ class InventoryEnvironment(gym.Env):
         alpha_A, beta_A = 15.0, 2.5   # Increased alpha, decreased beta
         alpha_B, beta_B = 30.0, 5.0   # Increased alpha, decreased beta
         alpha_C, beta_C = 60.0, 12.5  # Increased alpha, decreased beta
-        forecasted_A = float(gamma.ppf(demand_quantile, a=alpha_A, scale=beta_A))
-        forecasted_B = float(gamma.ppf(demand_quantile, a=alpha_B, scale=beta_B))
-        forecasted_C = float(gamma.ppf(demand_quantile, a=alpha_C, scale=beta_C))
         self.skus = {
             'Type_A': SKUData(
                 sku='Type_A',
@@ -127,7 +125,6 @@ class InventoryEnvironment(gym.Env):
                 lead_time_days=3,
                 alpha=alpha_A,
                 beta=beta_A,
-                forecasted_demand=forecasted_A,  # 90th percentile of gamma
                 eoq=20,
                 max_stock=170,
                 min_order_qty=10,
@@ -152,7 +149,6 @@ class InventoryEnvironment(gym.Env):
                 lead_time_days=7,
                 alpha=alpha_B,
                 beta=beta_B,
-                forecasted_demand=forecasted_B,  # 90th percentile of gamma
                 eoq=60,
                 max_stock=450,
                 min_order_qty=40,
@@ -177,7 +173,6 @@ class InventoryEnvironment(gym.Env):
                 lead_time_days=1,
                 alpha=alpha_C,
                 beta=beta_C,
-                forecasted_demand=forecasted_C,  # 90th percentile of gamma
                 eoq=600,
                 max_stock=3000,
                 min_order_qty=100,
@@ -272,20 +267,22 @@ class InventoryEnvironment(gym.Env):
         return total_demand * 1.20  # Add 20% safety factor
 
     def calculate_eoq(self, sku_id: str) -> int:
-        """Calculate Economic Order Quantity for a specific SKU"""
+        """Calculate Economic Order Quantity for a specific SKU using dynamic gamma params."""
         sku = self.skus[sku_id]
-        D = sku.forecasted_demand  # Annual demand
+        alpha, beta = self.estimate_gamma_params(sku)
+        D = alpha * beta  # Use mean of dynamic gamma
         K = self.config['order_cost']  # Order cost
         H = self.config['holding_cost']  # Holding cost
         return int(np.sqrt((2 * D * K) / H))
 
     def calculate_rop(self, sku_id: str) -> int:
-        """Calculate Reorder Point as a high percentile of the gamma distribution for demand during lead time."""
+        """Calculate Reorder Point as a high percentile of the gamma distribution for demand during lead time, using dynamic gamma params."""
         from scipy.stats import gamma
         sku = self.skus[sku_id]
+        alpha, beta = self.estimate_gamma_params(sku)
         quantile = 0.999 if sku_id == 'Type_C' else (0.98 if sku_id == 'Type_C' else 0.97)
-        shape = sku.alpha * sku.lead_time_days
-        scale = sku.beta
+        shape = alpha * sku.lead_time_days
+        scale = beta
         rop = gamma.ppf(quantile, a=shape, scale=scale)
         # Add safety stock (already calculated for high service level)
         return int(np.ceil(rop + sku.safety_stock))
@@ -420,6 +417,10 @@ class InventoryEnvironment(gym.Env):
                 sku.last_decision_time,
                 current_time
             )
+            # --- Update demand history for dynamic gamma forecasting ---
+            sku.demand_history.append(period_demand)
+            if len(sku.demand_history) > sku.demand_window:
+                sku.demand_history = sku.demand_history[-sku.demand_window:]
             sku.total_demand += period_demand
             fulfilled_current_demand = min(period_demand, sku.retail_stock)
             sku.retail_stock -= int(fulfilled_current_demand)
@@ -500,13 +501,14 @@ class InventoryEnvironment(gym.Env):
         return self._get_state(), total_reward, done, info
     
     def calculate_dynamic_safety_stock(self, sku, z=None):
-        """Calculate safety stock dynamically based on demand variability and lead time."""
+        """Calculate safety stock accurately based on demand variability and lead time, using dynamic gamma params."""
         if z is None:
             z = 4.0 if sku.sku == 'Type_C' else 2.5
+        # Use dynamic gamma parameters
+        alpha, beta = self.estimate_gamma_params(sku)
         L = sku.lead_time_days
-        alpha = sku.alpha
-        beta = sku.beta
-        std_lead_time_demand = np.sqrt(L * alpha * (beta ** 2))
+        demand_variance_per_day = alpha * (beta ** 2)
+        std_lead_time_demand = np.sqrt(L * demand_variance_per_day)
         return int(np.ceil(z * std_lead_time_demand))
 
     def reset(self):
@@ -569,3 +571,18 @@ class InventoryEnvironment(gym.Env):
             delta = sku.next_delivery_date - datetime.now()
             return max(0, delta.days)
         return sku.lead_time_days
+
+    def estimate_gamma_params(self, sku):
+        """Estimate gamma distribution parameters from recent demand history."""
+        history = sku.demand_history[-sku.demand_window:]
+        if len(history) < 2:
+            # Not enough data, fall back to static params
+            return sku.alpha, sku.beta
+        mean = np.mean(history)
+        var = np.var(history)
+        if var == 0 or mean == 0:
+            # Avoid division by zero
+            return 1000.0, mean / 1000.0 if mean > 0 else 1.0
+        alpha = mean ** 2 / var
+        beta = var / mean
+        return alpha, beta

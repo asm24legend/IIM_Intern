@@ -10,43 +10,40 @@ from scipy.stats import gamma
 import bisect
 
 # Define the experience replay buffer
-Experience = namedtuple('Experience', ('state', 'action', 'reward', 'next_state', 'done'))
+Experience = namedtuple('Experience', ('state', 'action', 'reward', 'next_state', 'done', 'episode_stockouts'))
 
-# --- Prioritized Experience Replay Buffer ---
-class PrioritizedReplayBuffer:
-    def __init__(self, capacity, alpha=0.6):
+# --- Episode-Stockout-Based Replay Buffer ---
+class StockoutReplayBuffer:
+    def __init__(self, capacity):
         self.capacity = capacity
-        self.alpha = alpha
         self.buffer = []
-        self.priorities = []
+        self.episode_stockouts = []
         self.pos = 0
 
-    def push(self, *args, td_error=None):
-        max_prio = max(self.priorities, default=1.0)
-        if len(self.buffer) < self.capacity:
-            self.buffer.append(Experience(*args))
-            self.priorities.append(max_prio)
+    def push(self, *args, episode_stockouts=0):
+        # args should be (state, action, reward, next_state, done)
+        if len(args) == 5:
+            exp = Experience(args[0], args[1], args[2], args[3], args[4], episode_stockouts)
         else:
-            self.buffer[self.pos] = Experience(*args)
-            self.priorities[self.pos] = max_prio
+            raise ValueError("Expected 5 arguments for Experience (state, action, reward, next_state, done)")
+        if len(self.buffer) < self.capacity:
+            self.buffer.append(exp)
+            self.episode_stockouts.append(episode_stockouts)
+        else:
+            self.buffer[self.pos] = exp
+            self.episode_stockouts[self.pos] = episode_stockouts
             self.pos = (self.pos + 1) % self.capacity
 
-    def sample(self, batch_size, beta=0.4):
+    def sample(self, batch_size):
         if len(self.buffer) == 0:
-            return [], [], []
-        prios = np.array(self.priorities)
-        probs = prios ** self.alpha
+            return []
+        stockouts = np.array(self.episode_stockouts)
+        # Lower stockouts = higher probability
+        probs = 1.0 / (stockouts + 1.0)
         probs /= probs.sum()
         indices = np.random.choice(len(self.buffer), batch_size, p=probs)
         samples = [self.buffer[idx] for idx in indices]
-        total = len(self.buffer)
-        weights = (total * probs[indices]) ** (-beta)
-        weights /= weights.max()
-        return samples, indices, torch.tensor(weights, dtype=torch.float32)
-
-    def update_priorities(self, indices, td_errors):
-        for idx, td_error in zip(indices, td_errors):
-            self.priorities[idx] = abs(td_error) + 1e-5
+        return samples
 
     def __len__(self):
         return len(self.buffer)
@@ -92,7 +89,7 @@ class DoubleDQNAgent:
         self.q_network = None
         self.target_network = None
         self.optimizer = None
-        self.memory = PrioritizedReplayBuffer(500000)
+        self.memory = StockoutReplayBuffer(500000)
         self.batch_size = 128
         self.update_target_every = 10
         self.tau = 0.005
@@ -166,7 +163,7 @@ class DoubleDQNAgent:
             best_orders[i] = self.order_level_values[best_order_level_idx]
         return best_orders
     
-    def learn(self, state, action, reward, next_state, env=None):
+    def learn(self, state, action, reward, next_state, env=None, episode_stockouts=0):
         """
         Update Q-values using Double DQN for multi-discrete actions
         """
@@ -174,12 +171,10 @@ class DoubleDQNAgent:
         discrete_next_state = self.discretize_state(next_state, env)
         num_skus = len(state) // 2
         action_indices = self._action_to_indices(action, num_skus)
-        # Use max priority for new experience
-        self.memory.push(discrete_state, action_indices, reward, discrete_next_state, False, td_error=1.0)
+        self.memory.push(discrete_state, action_indices, reward, discrete_next_state, False, episode_stockouts=episode_stockouts)
         if len(self.memory) < self.batch_size:
             return 0.0
-        beta = 0.4
-        samples, indices, weights = self.memory.sample(self.batch_size, beta=beta)
+        samples = self.memory.sample(self.batch_size)
         if not samples:
             return 0.0
         batch = Experience(*zip(*samples))
@@ -189,9 +184,6 @@ class DoubleDQNAgent:
         reward_batch = torch.clamp(reward_batch, -1000, 1000)
         next_state_batch = torch.FloatTensor(np.array(batch.next_state)).to(self.device)
         done_batch = torch.BoolTensor(batch.done).to(self.device)
-        if not isinstance(weights, torch.Tensor):
-            weights = torch.tensor(weights, dtype=torch.float32)
-        weights = weights.to(self.device)
         if self.q_network is None:
             raise ValueError("Q-network is not initialized.")
         if self.target_network is None:
@@ -204,7 +196,6 @@ class DoubleDQNAgent:
             next_q_values_target = self.target_network(next_state_batch)
         n_action_components = action_batch.shape[1]
         loss = torch.tensor(0.0, device=self.device)
-        td_errors = []
         # Per-SKU learning: each SKU's Q-value is updated independently
         for i in range(n_action_components):
             current_q = current_q_values[:, i]
@@ -213,10 +204,8 @@ class DoubleDQNAgent:
             next_actions = next_q_values[:, i].argmax(dim=0)
             next_q_selected = next_q_values_target[:, i][next_actions]
             target_q = reward_batch + (self.discount_factor * next_q_selected * (~done_batch).float())
-            td_error = (current_q_selected - target_q).detach().cpu().numpy()
-            component_loss = (F.smooth_l1_loss(current_q_selected, target_q, reduction='none') * weights).mean()
+            component_loss = F.smooth_l1_loss(current_q_selected, target_q)
             loss = loss + component_loss
-            td_errors.append(td_error)
         loss = loss / n_action_components
         if self.optimizer is None:
             raise ValueError("Optimizer is not initialized.")
@@ -228,11 +217,7 @@ class DoubleDQNAgent:
         if self.steps % self.update_target_every == 0:
             self.soft_update()
         self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
-        flat_td_errors = np.abs(np.concatenate(td_errors))
-        self.memory.update_priorities(indices, flat_td_errors)
-        mean_td_error = np.mean(flat_td_errors)
-        self.td_errors.append(mean_td_error)
-        return mean_td_error
+        return loss.item()
     
     def soft_update(self):
         """Soft update target network using Polyak averaging"""
