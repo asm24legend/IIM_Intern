@@ -13,7 +13,7 @@ This project implements a sophisticated inventory management system using multip
 - **Three Learning Agents**
   - **Double Q-learning Agent**: Traditional tabular Q-learning with dual Q-tables
   - **Double DQN Agent**: Deep Q-Network with neural networks and experience replay
-  - **Random Agent**: Baseline EOQ-based policy for comparison
+  - **Random Agent**: Simple order-up-to-reorder-point policy for comparison
 
 - **Seasonal Demand Modeling**
   - Cosine-based seasonal patterns: Demand = Acos(wt+phi) + noise
@@ -102,7 +102,7 @@ The system provides detailed comparison between:
 - Requires PyTorch
 
 ### Random Agent (Baseline)
-- EOQ-based policy
+- Simple order-up-to-reorder-point policy
 - No learning component
 - Serves as performance baseline
 

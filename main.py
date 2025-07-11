@@ -258,17 +258,16 @@ class RandomAgent:
         self.env = env
         self.action_space = env.action_space
     def get_action(self, state, env=None, greedy=False):
-        # Basic EOQ policy: if warehouse stock < reorder point, order up to EOQ, else order 0. Lead time reduction = 0.
+        # Simple order-up-to policy: order enough to reach reorder_point if below, else order 0.
         num_skus = len(self.env.skus)
         order_quantities = np.zeros(num_skus, dtype=np.int32)
         lead_time_reductions = np.zeros(num_skus, dtype=np.int32)
         for i, sku_id in enumerate(self.env.skus):
             sku = self.env.skus[sku_id]
             warehouse_stock = state[2*i]
-            reorder_point = sku.reorder_point
-            eoq = sku.eoq
-            if warehouse_stock < reorder_point:
-                order_quantities[i] = eoq
+            target_level = sku.reorder_point  # or use sku.max_stock for a more aggressive policy
+            if warehouse_stock < target_level:
+                order_quantities[i] = target_level - warehouse_stock
             else:
                 order_quantities[i] = 0
             lead_time_reductions[i] = 0
@@ -308,7 +307,7 @@ def main():
     num_episodes = 5000
     eval_interval = 100
     
-    print("Starting training for Double Q-learning agent...")
+    print("Starting training for Q-learning agent...")
     print(f"Training will run for {num_episodes} episodes")
     
     # Train Double Q-learning agent

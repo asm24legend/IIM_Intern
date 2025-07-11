@@ -59,19 +59,17 @@ class InventoryEnvironment(gym.Env):
         
         self.config = {
             'max_inventory': 1000,
-            'max_demand': 100,
+            
             'holding_cost': 2,
             'stockout_cost': 50,
             'order_cost': 100,
             'transportation_cost_per_unit': 5,  # Added transportation cost per unit
-            'min_lead_time': 1,
-            'max_lead_time': 14,
+            
             'retail_replenishment_time': 1,  # Days to replenish retail from warehouse
             'noise_std': 10,
             'min_decision_interval': 0.1,  # Minimum time between decisions (in days)
             'current_time': 0.0,  # Current simulation time in days (float)
-            'lead_time_reduction_cost': 50,  # Cost per day of lead time reduction
-            'max_lead_time_reduction': 3,  # Maximum days by which lead time can be reduced
+            
             'use_fixed_demand': False,      # Toggle for benchmarking
             'fixed_daily_demand': 5         # Value for fixed demand
         } if config is None else config
@@ -105,16 +103,7 @@ class InventoryEnvironment(gym.Env):
             'Type_C': 60
         }
 
-        # Set quantile for forecasted demand
-        demand_quantile = 0.9  # 90th percentile
-        # Import gamma only when needed for quantile calculation
-        from scipy.stats import gamma
-        # Initialize SKUs with seasonal demand parameters
         base_date = datetime.now()
-        # For each SKU, set forecasted_demand to the 90th percentile of the gamma distribution
-        alpha_A, beta_A = 15.0, 2.5   # Increased alpha, decreased beta
-        alpha_B, beta_B = 30.0, 5.0   # Increased alpha, decreased beta
-        alpha_C, beta_C = 60.0, 12.5  # Increased alpha, decreased beta
         self.skus = {
             'Type_A': SKUData(
                 sku='Type_A',
@@ -123,8 +112,7 @@ class InventoryEnvironment(gym.Env):
                 reorder_point=40,
                 safety_stock=20,
                 lead_time_days=3,
-                alpha=alpha_A,
-                beta=beta_A,
+                
                 eoq=20,
                 max_stock=170,
                 min_order_qty=10,
@@ -138,7 +126,9 @@ class InventoryEnvironment(gym.Env):
                 stockout_cost_multiplier=2.0,
                 abc_class='A',
                 unit_value=1000.0,
-                last_decision_time=0.0
+                last_decision_time=0.0,
+                alpha=2.0,
+                beta=2.0
             ),
             'Type_B': SKUData(
                 sku='Type_B',
@@ -147,8 +137,7 @@ class InventoryEnvironment(gym.Env):
                 reorder_point=120,
                 safety_stock=60,
                 lead_time_days=7,
-                alpha=alpha_B,
-                beta=beta_B,
+                
                 eoq=60,
                 max_stock=450,
                 min_order_qty=40,
@@ -162,7 +151,9 @@ class InventoryEnvironment(gym.Env):
                 stockout_cost_multiplier=1.0,
                 abc_class='B',
                 unit_value=300.0,
-                last_decision_time=0.0
+                last_decision_time=0.0,
+                alpha=2.0,
+                beta=2.0
             ),
             'Type_C': SKUData(
                 sku='Type_C',
@@ -171,8 +162,7 @@ class InventoryEnvironment(gym.Env):
                 reorder_point=350,
                 safety_stock=50,
                 lead_time_days=1,
-                alpha=alpha_C,
-                beta=beta_C,
+               
                 eoq=600,
                 max_stock=3000,
                 min_order_qty=100,
@@ -187,27 +177,29 @@ class InventoryEnvironment(gym.Env):
                 abc_class='C',
                 unit_value=50.0,
                 shelf_life_days=6,
-                last_decision_time=0.0
+                last_decision_time=0.0,
+                alpha=2.0,
+                beta=2.0
             )
         }
-        # NOTE: forecasted_demand is now set to the 90th percentile (quantile=0.9) of the gamma distribution for each SKU.
+       
         
         # Initialize suppliers with their capabilities and products
         self.suppliers = {
             'Supplier_X': {
-                'lead_time_range': (5, 10),
+                'lead_time_range': (2, 10),
                 'current_load': 0,
                 'reliability': 0.95,
                 'products': ['Type_A']
             },
             'Supplier_Y': {
-                'lead_time_range': (7, 12),
+                'lead_time_range': (5,10),
                 'current_load': 0,
                 'reliability': 0.90,
                 'products': ['Type_B']  # Only Type_B now
             },
             'Supplier_Z': {
-                'lead_time_range': (6, 11),
+                'lead_time_range': (6,10),
                 'current_load': 0,
                 'reliability': 0.92,
                 'products': ['Type_C']  # New supplier for Type_C
@@ -300,16 +292,18 @@ class InventoryEnvironment(gym.Env):
         sku = self.skus[sku_id]
         location = self.inventory_locations[sku.inventory_location]
         # Location-specific stockout penalties (further reduced)
+        # Scale by SKU criticality: A=2.0, B=1.5, C=1.0
+        criticality_multiplier = 2.0 if sku.abc_class == 'A' else (1.5 if sku.abc_class == 'B' else 1.0)
         if stockout > 0:
             if sku.inventory_location == 'Location_1':
-                reward -= 25 * stockout  # Was 50
+                reward -= 25 * stockout * criticality_multiplier  # Was 50
             elif sku.inventory_location == 'Location_2':
-                reward -= 20 * stockout   # Was 40
+                reward -= 20 * stockout * criticality_multiplier   # Was 40
             elif sku.inventory_location == 'Location_3':
-                reward -= 15 * stockout   # Was 30
+                reward -= 15 * stockout * criticality_multiplier   # Was 30
             # Retail penalty further reduced
             if sku.retail_stock <= 0:
-                reward -= 375 * stockout  # Was 750
+                reward -= 375 * stockout * criticality_multiplier  # Was 750
         else:
             # Higher rewards for fulfillment (further doubled)
             if sku.inventory_location == 'Location_1':
