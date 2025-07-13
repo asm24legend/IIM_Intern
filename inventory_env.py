@@ -6,17 +6,18 @@ from typing import Dict, List
 from collections import defaultdict
 from datetime import datetime, timedelta
 
+#Importing all the required libraries
 @dataclass
 class SKUData:
     #Define the datatypes for the sku data
-    sku: str
-    description: str
-    current_stock: int
-    reorder_point: int
-    safety_stock: int
-    lead_time_days: int
-    eoq: int
-    max_stock: int
+    sku: str  #The item code
+    description: str #The item category
+    current_stock: int  #Inventory level present
+    reorder_point: int  #Point at which inventory is reordered
+    safety_stock: int  #Amount of minimum inventory that should be there
+    lead_time_days: int #Number of days required for order fulfillment  
+    eoq: int #minimum inventory to reduce costs, as a baseline policy. To decide how much to order each time. 
+    max_stock: int #Maximum amount of stock that can be there in an inventory
     min_order_qty: int
     inventory_location: str
     supplier: str
