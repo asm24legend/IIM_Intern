@@ -1,21 +1,21 @@
 # Multi-Agent Inventory Management System
 
-This project implements a sophisticated inventory management system using multiple reinforcement learning agents for multi-echelon supply chain optimization. The system compares Double Q-learning, Double DQN, and Random agents to manage inventory levels across multiple locations while considering seasonal demand patterns.
+This project implements a sophisticated inventory management system using multiple reinforcement learning agents for multi-echelon supply chain optimization. The system compares Standard Q-learning, Double DQN, and Random agents to manage inventory levels across multiple locations while considering Gamma distributed demand. 
 
 ## Features
 
 - **Multi-Echelon Supply Chain**
-  - Multiple suppliers (X, Y)
+  - Multiple suppliers (X, Y, Z)
   - Multiple inventory locations
   - Retail store management
   - SKU tracking (Products A, B, C)
 
 - **Three Learning Agents**
-  - **Double Q-learning Agent**: Traditional tabular Q-learning with dual Q-tables
+  - **Q-learning Agent**: Traditional tabular Q-learning with single Q-table
   - **Double DQN Agent**: Deep Q-Network with neural networks and experience replay
   - **Random Agent**: Simple order-up-to-reorder-point policy for comparison
 
-- **Seasonal Demand Modeling**
+- **Seasonal Demand Modeling (Optional)**
   - Cosine-based seasonal patterns: Demand = Acos(wt+phi) + noise
   - Product-specific cycles:
     * Type A: Annual cycle (365 days)
