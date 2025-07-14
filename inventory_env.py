@@ -16,7 +16,6 @@ class SKUData:
     reorder_point: int  #Point at which inventory is reordered
     safety_stock: int  #Amount of minimum inventory that should be there
     lead_time_days: int #Number of days required for order fulfillment  
-    eoq: int #minimum inventory to reduce costs, as a baseline policy. To decide how much to order each time. 
     max_stock: int #Maximum amount of stock that can be there in an inventory
     min_order_qty: int
     inventory_location: str
@@ -26,11 +25,8 @@ class SKUData:
     next_delivery_date: datetime  
     previous_demand: float = 0
     retail_stock: int = 0  # Stock at retail store
-    stockout_cost_multiplier: float = 1.0 # New field for SKU-specific stockout cost
     # Add ABC classification and value
     abc_class: str = 'C'  # A, B, or C classification
-    unit_value: float = 0.0  # Per-unit value for revenue/cost analysis
-    # Add seasonal demand parameters
     base_demand: float = 0  # Base demand level
     
     last_decision_time: float = 0  # New field to track when last decision was made
@@ -42,6 +38,7 @@ class SKUData:
     alpha: float = 2.0  # Shape parameter for gamma demand
     beta: float = 2.0   # Scale parameter for gamma demand
     retail_replenishment_lead_time: int = 1  # Lead time (days) for warehouse to retail
+    retail_lead_time_days: int = 1  # Lead time (days) for SKU to reach retail from its warehouse location
     retail_replenishment_queue: list = field(default_factory=list)  # List of (arrival_time, amount) tuples
     shelf_life_days: int = 30  # Default shelf life in days
     demand_history: list = field(default_factory=list)  # Rolling window of recent daily demand
@@ -60,11 +57,6 @@ class InventoryEnvironment(gym.Env):
         
         self.config = {
             'max_inventory': 1000,
-            
-            'holding_cost': 2,
-            'stockout_cost': 50,
-            'order_cost': 100,
-            'transportation_cost_per_unit': 5,  # Added transportation cost per unit
             
             'retail_replenishment_time': 1,  # Days to replenish retail from warehouse
             'noise_std': 10,
@@ -114,7 +106,6 @@ class InventoryEnvironment(gym.Env):
                 safety_stock=20,
                 lead_time_days=3,
                 
-                eoq=20,
                 max_stock=170,
                 min_order_qty=10,
                 inventory_location='Location_1',
@@ -124,12 +115,11 @@ class InventoryEnvironment(gym.Env):
                 next_delivery_date=base_date + timedelta(days=3),
                 retail_stock=40,
                 base_demand=50,
-                stockout_cost_multiplier=2.0,
                 abc_class='A',
-                unit_value=1000.0,
                 last_decision_time=0.0,
                 alpha=2.0,
-                beta=2.0
+                beta=2.0,
+                retail_lead_time_days=2
             ),
             'Type_B': SKUData(
                 sku='Type_B',
@@ -139,7 +129,6 @@ class InventoryEnvironment(gym.Env):
                 safety_stock=60,
                 lead_time_days=7,
                 
-                eoq=60,
                 max_stock=450,
                 min_order_qty=40,
                 inventory_location='Location_2',
@@ -149,12 +138,11 @@ class InventoryEnvironment(gym.Env):
                 next_delivery_date=base_date + timedelta(days=7),
                 retail_stock=75,
                 base_demand=200,
-                stockout_cost_multiplier=1.0,
                 abc_class='B',
-                unit_value=300.0,
                 last_decision_time=0.0,
                 alpha=2.0,
-                beta=2.0
+                beta=2.0,
+                retail_lead_time_days=3
             ),
             'Type_C': SKUData(
                 sku='Type_C',
@@ -164,7 +152,6 @@ class InventoryEnvironment(gym.Env):
                 safety_stock=50,
                 lead_time_days=1,
                
-                eoq=600,
                 max_stock=3000,
                 min_order_qty=100,
                 inventory_location='Location_3',
@@ -174,13 +161,11 @@ class InventoryEnvironment(gym.Env):
                 next_delivery_date=base_date + timedelta(days=1),
                 retail_stock=180,
                 base_demand=1000,
-                stockout_cost_multiplier=0.5,
                 abc_class='C',
-                unit_value=50.0,
-                shelf_life_days=6,
                 last_decision_time=0.0,
                 alpha=2.0,
-                beta=2.0
+                beta=2.0,
+                retail_lead_time_days=1
             )
         }
        
@@ -259,27 +244,6 @@ class InventoryEnvironment(gym.Env):
         self.config['current_time'] = current_time
         return total_demand * 1.20  # Add 20% safety factor
 
-    def calculate_eoq(self, sku_id: str) -> int:
-        """Calculate Economic Order Quantity for a specific SKU using dynamic gamma params."""
-        sku = self.skus[sku_id]
-        alpha, beta = self.estimate_gamma_params(sku)
-        D = alpha * beta  # Use mean of dynamic gamma
-        K = self.config['order_cost']  # Order cost
-        H = self.config['holding_cost']  # Holding cost
-        return int(np.sqrt((2 * D * K) / H))
-
-    def calculate_rop(self, sku_id: str) -> int:
-        """Calculate Reorder Point as a high percentile of the gamma distribution for demand during lead time, using dynamic gamma params."""
-        from scipy.stats import gamma
-        sku = self.skus[sku_id]
-        alpha, beta = self.estimate_gamma_params(sku)
-        quantile = 0.999 if sku_id == 'Type_C' else (0.98 if sku_id == 'Type_C' else 0.97)
-        shape = alpha * sku.lead_time_days
-        scale = beta
-        rop = gamma.ppf(quantile, a=shape, scale=scale)
-        # Add safety stock (already calculated for high service level)
-        return int(np.ceil(rop + sku.safety_stock))
-
     def calculate_reward(self, sku_id: str, stockout: int, current_stock: int, 
                            daily_demand: float, current_lead_time: int, previous_lead_time: int) -> float:
         """
@@ -316,17 +280,16 @@ class InventoryEnvironment(gym.Env):
             if sku.retail_stock > 0:
                 reward += 400  # Was 200
         # Inventory level management (penalties further reduced, rewards further increased)
-        eoq = self.calculate_eoq(sku_id)
         # Penalty for excess inventory (halved again)
-        if current_stock > eoq:
-            excess = current_stock - eoq
+        if current_stock > sku.max_stock:
+            excess = current_stock - sku.max_stock
             reward -= excess * 0.0125  # Was 0.025
         # Penalty for being below safety stock (halved again)
         elif current_stock < sku.safety_stock:
             deficit = sku.safety_stock - current_stock
             reward -= deficit * 0.5  # Was 1.0
         # Higher reward for optimal inventory level (further doubled)
-        if sku.safety_stock <= current_stock <= eoq:
+        if sku.safety_stock <= current_stock <= sku.max_stock:
             reward += 400  # Was 200
         # Additional reward for maintaining good service level (further doubled)
         if sku.total_demand > 0:
@@ -398,8 +361,8 @@ class InventoryEnvironment(gym.Env):
                 shelf_life_stockout = 1
             # --- Supplier to Location (warehouse) ---
             if order_qty_warehouse[i] > 0:
-                current_rop = self.calculate_rop(sku_id)
-                if sku.current_stock < current_rop and sku.current_stock < sku.max_stock:
+                # Use reorder_point directly since calculate_rop is removed
+                if sku.current_stock < sku.reorder_point and sku.current_stock < sku.max_stock:
                     base_order = max(order_qty_warehouse[i], sku.min_order_qty)
                     available_capacity = sku.max_stock - (sku.current_stock + sku.open_pos)
                     order_qty = min(base_order, available_capacity)
@@ -448,7 +411,7 @@ class InventoryEnvironment(gym.Env):
             if sku.retail_stock < retail_threshold:
                 replenish_amount = min(target_retail - sku.retail_stock, sku.current_stock)
                 if replenish_amount > 0:
-                    arrival_time = current_time + sku.retail_replenishment_lead_time
+                    arrival_time = current_time + sku.retail_lead_time_days
                     sku.retail_replenishment_queue.append((arrival_time, replenish_amount))
             sku.previous_demand = period_demand
             sku.last_decision_time = current_time
@@ -496,11 +459,11 @@ class InventoryEnvironment(gym.Env):
         return self._get_state(), total_reward, done, info
     
     def calculate_dynamic_safety_stock(self, sku, z=None):
-        """Calculate safety stock accurately based on demand variability and lead time, using dynamic gamma params."""
+        """Calculate safety stock accurately based on demand variability and lead time, using fixed gamma params."""
         if z is None:
             z = 4.0 if sku.sku == 'Type_C' else 2.5
-        # Use dynamic gamma parameters
-        alpha, beta = self.estimate_gamma_params(sku)
+        # Use fixed gamma parameters from SKU
+        alpha, beta = sku.alpha, sku.beta
         L = sku.lead_time_days
         demand_variance_per_day = alpha * (beta ** 2)
         std_lead_time_demand = np.sqrt(L * demand_variance_per_day)
@@ -567,17 +530,4 @@ class InventoryEnvironment(gym.Env):
             return max(0, delta.days)
         return sku.lead_time_days
 
-    def estimate_gamma_params(self, sku):
-        """Estimate gamma distribution parameters from recent demand history."""
-        history = sku.demand_history[-sku.demand_window:]
-        if len(history) < 2:
-            # Not enough data, fall back to static params
-            return sku.alpha, sku.beta
-        mean = np.mean(history)
-        var = np.var(history)
-        if var == 0 or mean == 0:
-            # Avoid division by zero
-            return 1000.0, mean / 1000.0 if mean > 0 else 1.0
-        alpha = mean ** 2 / var
-        beta = var / mean
-        return alpha, beta
+    

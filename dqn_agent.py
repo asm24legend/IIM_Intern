@@ -37,12 +37,24 @@ class StockoutReplayBuffer:
     def sample(self, batch_size):
         if len(self.buffer) == 0:
             return []
-        stockouts = np.array(self.episode_stockouts)
-        # Lower stockouts = higher probability
-        probs = 1.0 / (stockouts + 1.0)
-        probs /= probs.sum()
-        indices = np.random.choice(len(self.buffer), batch_size, p=probs)
-        samples = [self.buffer[idx] for idx in indices]
+        # Prioritize experiences with <1 retail stockout
+        indices_priority = [i for i, exp in enumerate(self.buffer) if exp.episode_stockouts < 1]
+        indices_other = [i for i, exp in enumerate(self.buffer) if exp.episode_stockouts >= 1]
+        n_priority = int(batch_size * 0.7)  # 70% from priority
+        n_other = batch_size - n_priority
+        if len(indices_priority) >= n_priority:
+            chosen_priority = np.random.choice(indices_priority, n_priority, replace=False)
+        else:
+            chosen_priority = np.random.choice(indices_priority, len(indices_priority), replace=False) if indices_priority else []
+            n_other = batch_size - len(chosen_priority)
+        if len(indices_other) >= n_other:
+            chosen_other = np.random.choice(indices_other, n_other, replace=False)
+        else:
+            chosen_other = np.random.choice(indices_other, len(indices_other), replace=False) if indices_other else []
+        chosen_indices = np.concatenate([chosen_priority, chosen_other]) if len(chosen_priority) or len(chosen_other) else []
+        if len(chosen_indices) == 0:
+            chosen_indices = np.random.choice(len(self.buffer), batch_size, replace=False)
+        samples = [self.buffer[int(idx)] for idx in chosen_indices]
         return samples
 
     def __len__(self):
@@ -91,7 +103,7 @@ class DoubleDQNAgent:
         self.optimizer = None
         self.memory = StockoutReplayBuffer(500000)
         self.batch_size = 128
-        self.update_target_every = 10
+        self.update_target_every = 1
         self.tau = 0.005
         self.steps = 0
         self.td_errors = []
@@ -131,13 +143,12 @@ class DoubleDQNAgent:
         return normalized_state.astype(np.float32)
     
     def get_action(self, state, env, greedy=False):
-        """
-        Get action using epsilon-greedy policy (or greedy if specified)
-        """
+        if env is None:
+            raise ValueError('env must not be None when calling get_action')
         num_skus = len(env.skus)
         if self.order_level_values is None:
             self.order_level_values = np.linspace(0, env.action_space.high[0], self.num_order_levels, dtype=np.int32)
-        if self.q_network is None:
+        if self.q_network is None or self.target_network is None:
             state_size = len(self.discretize_state(state, env))
             self.initialize_networks(state_size, num_skus)
         if not greedy and np.random.random() < self.epsilon:
@@ -147,14 +158,11 @@ class DoubleDQNAgent:
         discrete_state = self.discretize_state(state, env)
         state_tensor = torch.FloatTensor(discrete_state).unsqueeze(0).to(self.device)
         if self.q_network is None:
-            raise ValueError("Q-network is not initialized.")
+            raise ValueError('Q-network is not initialized.')
         with torch.no_grad():
             q_values = self.q_network(state_tensor)
-            if q_values is None:
-                raise ValueError("Q-network returned None.")
             q_values = q_values.cpu().numpy()[0]
         best_orders = np.zeros(num_skus)
-        # Per-SKU action selection: each SKU's action is chosen independently
         for i in range(num_skus):
             order_q_start_idx = i * self.num_order_levels
             order_q_end_idx = order_q_start_idx + self.num_order_levels
@@ -164,13 +172,20 @@ class DoubleDQNAgent:
         return best_orders
     
     def learn(self, state, action, reward, next_state, env=None, episode_stockouts=0):
-        """
-        Update Q-values using Double DQN for multi-discrete actions
-        """
+        if env is None:
+            raise ValueError('env must not be None when calling learn')
         discrete_state = self.discretize_state(state, env)
         discrete_next_state = self.discretize_state(next_state, env)
-        num_skus = len(state) // 2
-        action_indices = self._action_to_indices(action, num_skus)
+        num_skus = len(action)
+        if self.order_level_values is None:
+            self.order_level_values = np.linspace(0, env.action_space.high[0], self.num_order_levels, dtype=np.int32)
+        if self.q_network is None or self.target_network is None:
+            state_size = len(discrete_state)
+            self.initialize_networks(state_size, num_skus)
+        action_indices = []
+        for i in range(num_skus):
+            order_level_idx = np.argmin(np.abs(self.order_level_values - action[i]))
+            action_indices.append(order_level_idx)
         self.memory.push(discrete_state, action_indices, reward, discrete_next_state, False, episode_stockouts=episode_stockouts)
         if len(self.memory) < self.batch_size:
             return 0.0
@@ -184,10 +199,8 @@ class DoubleDQNAgent:
         reward_batch = torch.clamp(reward_batch, -1000, 1000)
         next_state_batch = torch.FloatTensor(np.array(batch.next_state)).to(self.device)
         done_batch = torch.BoolTensor(batch.done).to(self.device)
-        if self.q_network is None:
-            raise ValueError("Q-network is not initialized.")
-        if self.target_network is None:
-            raise ValueError("Target network is not initialized.")
+        if self.q_network is None or self.target_network is None:
+            raise ValueError('Q-network and target network must be initialized.')
         self.q_network.train()
         self.target_network.eval()
         current_q_values = self.q_network(state_batch)
@@ -196,7 +209,6 @@ class DoubleDQNAgent:
             next_q_values_target = self.target_network(next_state_batch)
         n_action_components = action_batch.shape[1]
         loss = torch.tensor(0.0, device=self.device)
-        # Per-SKU learning: each SKU's Q-value is updated independently
         for i in range(n_action_components):
             current_q = current_q_values[:, i]
             action_idx = action_batch[:, i]
@@ -207,6 +219,7 @@ class DoubleDQNAgent:
             component_loss = F.smooth_l1_loss(current_q_selected, target_q)
             loss = loss + component_loss
         loss = loss / n_action_components
+        
         if self.optimizer is None:
             raise ValueError("Optimizer is not initialized.")
         self.optimizer.zero_grad()
@@ -225,16 +238,6 @@ class DoubleDQNAgent:
             for target_param, param in zip(self.target_network.parameters(), self.q_network.parameters()):
                 target_param.data.copy_(self.tau * param.data + (1.0 - self.tau) * target_param.data)
     
-    def _action_to_indices(self, action, num_skus):
-        """Convert continuous action to discrete indices for neural network"""
-        indices = []
-        for i in range(num_skus):
-            # Order quantity index
-            order_idx = np.argmin(np.abs(self.order_level_values - action[i]))
-            indices.append(order_idx)
-        
-        return indices
-    
     def get_average_td_error(self, window=100):
         """Get average TD error over last n steps"""
         if len(self.td_errors) == 0:
@@ -249,7 +252,6 @@ class DoubleDQNAgent:
             'optimizer_state_dict': self.optimizer.state_dict() if self.optimizer is not None else None,
             'epsilon': self.epsilon,
             'td_errors': self.td_errors,
-            'order_level_values': self.order_level_values
         }, filename + '_dqn.pkl')
     
     def load(self, filename):
@@ -268,5 +270,4 @@ class DoubleDQNAgent:
         if self.optimizer is not None and checkpoint['optimizer_state_dict'] is not None:
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.epsilon = checkpoint.get('epsilon', self.epsilon)
-        self.td_errors = checkpoint.get('td_errors', [])
-        self.order_level_values = checkpoint.get('order_level_values', self.order_level_values) 
+        self.td_errors = checkpoint.get('td_errors', []) 

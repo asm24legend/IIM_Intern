@@ -1,3 +1,4 @@
+
 import numpy as np
 from inventory_env import InventoryEnvironment
 from q_learning_agent import TDAgent
@@ -75,7 +76,7 @@ def plot_moving_average(data, window, title, ylabel, save_path):
     plt.savefig(save_path)
     plt.close()
 
-def train(env, agent, num_episodes=100, max_steps=500):
+def train(env, agent, num_episodes=100, max_steps=5000):
     """Train the agent"""
     rewards_history = []
     td_errors = []
@@ -131,7 +132,7 @@ def train(env, agent, num_episodes=100, max_steps=500):
             service_level * 100 for service_level in info['service_levels'].values()
         ]))
         rewards_history.append(float(episode_reward))
-        td_errors.append(float(agent.get_average_td_error()))
+        td_errors.append(float(td_error))  # Use the actual batch TD error
         metrics_history.append(episode_metrics)
         episode_lengths.append(int(episode_steps))
         if (episode + 1) % 10 == 0:
@@ -304,7 +305,7 @@ def main():
     )
     
     # Training parameters
-    num_episodes = 5000
+    num_episodes = 10000
     eval_interval = 100
     
     print("Starting training for Q-learning agent...")
@@ -450,7 +451,7 @@ def main():
     x = np.arange(len(labels))
     width = 0.25
     plt.figure(figsize=(15, 6))
-    plt.bar(x - width, td_values, width, label='Double Q-learning')
+    plt.bar(x - width, td_values, width, label='Q-learning')
     plt.bar(x, dqn_values, width, label='Double DQN')
     plt.bar(x + width, random_values, width, label='Random')
     plt.xticks(x, labels)
