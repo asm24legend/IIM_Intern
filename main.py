@@ -292,7 +292,7 @@ def main():
     for sku_id, sku in env.skus.items():
         print(f"SKU {sku_id}: alpha={sku.alpha}, beta={sku.beta}")
     
-    # Double Q-learning agent
+    # Q-learning agent
     td_agent = TDAgent(
         action_space=env.action_space,
         discount_factor=0.99
@@ -319,7 +319,7 @@ def main():
         max_steps=500
     )
     
-    # Plot training progress for Double Q-learning
+    # Plot training progress for Q-learning
     plot_training_progress(td_rewards_history, td_errors, td_metrics_history, results_dir)
     
     print("\nStarting training for Double DQN agent...")
