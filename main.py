@@ -131,15 +131,14 @@ def train(env, agent, num_episodes=100, max_steps=5000):
                     episode_metrics['location_stockouts']['Retail'] += stockout
             for sku_id in env.skus:
                 location = env.skus[sku_id].inventory_location
+                location_stock_key = location + '_stock'
                 if sku_id not in episode_metrics['warehouse_levels'][location]:
-                episode_metrics['warehouse_levels'][location][sku_id] = []
+                    episode_metrics['warehouse_levels'][location][sku_id] = []
                 episode_metrics['warehouse_levels'][location][sku_id].append(
-                int(info['warehouse_stock'][sku_id])
-               )
-
+                    int(info[location_stock_key][sku_id])
+                )
                 if sku_id not in episode_metrics['retail_levels']:
                     episode_metrics['retail_levels'][sku_id] = []
-                episode_metrics['warehouse_levels'][sku_id].append(int(info['warehouse_stock'][sku_id]))
                 episode_metrics['retail_levels'][sku_id].append(int(info['retail_stock'][sku_id]))
             episode_metrics['supplier_reliability'] = {
                 k: float(v) for k, v in info['supplier_reliability'].items()
@@ -282,13 +281,19 @@ class RandomAgent:
         lead_time_reductions = np.zeros(num_skus, dtype=np.int32)
         for i, sku_id in enumerate(self.env.skus):
             sku = self.env.skus[sku_id]
-            warehouse_stock = state[2*i]
+            Location_1_stock = state[2*i]
+            Location_2_stock = state[2*i+1]
+            Location_3_stock = state[2*i+2]
             target_level = sku.reorder_point  # or use sku.max_stock for a more aggressive policy
-            if warehouse_stock < target_level:
-                order_quantities[i] = target_level - warehouse_stock
+            if Location_1_stock < target_level:
+                order_quantities[i] = target_level - Location_1_stock
+            elif Location_2_stock < target_level:
+                order_quantities[i] = target_level - Location_2_stock
+            elif Location_3_stock < target_level:
+                order_quantities[i] = target_level - Location_3_stock
             else:
                 order_quantities[i] = 0
-            lead_time_reductions[i] = 0
+            
         return np.concatenate([order_quantities, lead_time_reductions])
     def learn(self, *args, **kwargs):
         return 0.0

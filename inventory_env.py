@@ -43,6 +43,9 @@ class SKUData:
     shelf_life_days: int = 30  # Default shelf life in days
     demand_history: list = field(default_factory=list)  # Rolling window of recent daily demand
     demand_window: int = 30  # Number of days for rolling window
+    open_pos_supplier_to_warehouse: int = 0  # Open POs from supplier to warehouse
+    open_pos_warehouse_to_retail: int = 0    # Open POs from warehouse to retail
+    retail_reorder_point: int = 0            # ROP for retail
 
 @dataclass
 class InventoryLocation:
@@ -119,7 +122,10 @@ class InventoryEnvironment(gym.Env):
                 last_decision_time=0.0,
                 alpha=2.0,
                 beta=2.0,
-                retail_lead_time_days=2
+                retail_lead_time_days=2,
+                open_pos_supplier_to_warehouse=0,
+                open_pos_warehouse_to_retail=0,
+                retail_reorder_point=0
             ),
             'Type_B': SKUData(
                 sku='Type_B',
@@ -142,7 +148,10 @@ class InventoryEnvironment(gym.Env):
                 last_decision_time=0.0,
                 alpha=2.0,
                 beta=2.0,
-                retail_lead_time_days=3
+                retail_lead_time_days=3,
+                open_pos_supplier_to_warehouse=0,
+                open_pos_warehouse_to_retail=0,
+                retail_reorder_point=0
             ),
             'Type_C': SKUData(
                 sku='Type_C',
@@ -165,7 +174,10 @@ class InventoryEnvironment(gym.Env):
                 last_decision_time=0.0,
                 alpha=2.0,
                 beta=2.0,
-                retail_lead_time_days=1
+                retail_lead_time_days=1,
+                open_pos_supplier_to_warehouse=0,
+                open_pos_warehouse_to_retail=0,
+                retail_reorder_point=0
             )
         }
        
@@ -204,7 +216,9 @@ class InventoryEnvironment(gym.Env):
         
         # Initialize observation space. Information visible to the agent in order to take decisions.
         self.observation_space = spaces.Dict({
-            'warehouse_stock': spaces.Box(low=0, high=self.config['max_inventory'], shape=(num_skus,), dtype=np.int32),
+            'Location_1_stock': spaces.Box(low=0, high=self.config['max_inventory'], shape=(num_skus,), dtype=np.int32),
+            'Location_2_stock': spaces.Box(low=0, high=self.config['max_inventory'], shape=(num_skus,), dtype=np.int32),
+            'Location_3_stock': spaces.Box(low=0, high=self.config['max_inventory'], shape=(num_skus,), dtype=np.int32),
             'retail_stock': spaces.Box(low=0, high=self.config['max_inventory'], shape=(num_skus,), dtype=np.int32),
             'open_pos': spaces.Box(low=0, high=self.config['max_inventory'], shape=(num_skus,), dtype=np.int32),
             'demand': spaces.Box(low=0, high=np.inf, shape=(num_skus,), dtype=np.float32),
@@ -249,10 +263,10 @@ class InventoryEnvironment(gym.Env):
                            daily_demand: float, current_lead_time: int, previous_lead_time: int) -> float:
         """
         Calculate reward with location-specific rewards and penalties:
-        1. Location-specific stockout penalties
-        2. Location-specific demand fulfillment rewards
-        3. Inventory level penalties to maintain efficiency
-        4. Lead time reduction rewards
+        1. Location-specific stockout penalties (reduced)
+        2. Location-specific demand fulfillment rewards (reduced)
+        3. Inventory level penalties to maintain efficiency (reduced)
+        4. Lead time reduction rewards (reduced)
         """
         reward = 0.0
         sku = self.skus[sku_id]
@@ -262,46 +276,63 @@ class InventoryEnvironment(gym.Env):
         criticality_multiplier = 2.0 if sku.abc_class == 'A' else (1.5 if sku.abc_class == 'B' else 1.0)
         if stockout > 0:
             if sku.inventory_location == 'Location_1':
-                reward -= 25 * stockout * criticality_multiplier 
+                reward -= 12.5 * stockout * criticality_multiplier 
             elif sku.inventory_location == 'Location_2':
-                reward -= 20 * stockout * criticality_multiplier   
+                reward -= 10 * stockout * criticality_multiplier   
             elif sku.inventory_location == 'Location_3':
-                reward -= 15 * stockout * criticality_multiplier  
+                reward -= 7.5 * stockout * criticality_multiplier  
             # Retail penalty 
             if sku.retail_stock <= 0:
-                reward -= 375 * stockout * criticality_multiplier  
+                reward -= 187.5 * stockout * criticality_multiplier  
         else:
-            # Higher rewards for fulfillment 
+            # Higher rewards for fulfillment (reduced)
             if sku.inventory_location == 'Location_1':
-                reward += 400  
+                reward += 200  
             elif sku.inventory_location == 'Location_2':
-                reward += 320   
+                reward += 160   
             elif sku.inventory_location == 'Location_3':
-                reward += 240   
+                reward += 120   
             if sku.retail_stock > 0:
-                reward += 400  
-        
-        # Penalty for excess inventory 
+                reward += 200  
+        # Penalty for excess inventory (reduced)
         if current_stock > sku.max_stock:
             excess = current_stock - sku.max_stock
-            reward -= excess * 0.0125  
-        # Penalty for being below safety stock 
+            reward -= excess * 0.00625  
+        # Penalty for being below safety stock (reduced)
         elif current_stock < sku.safety_stock:
             deficit = sku.safety_stock - current_stock
-            reward -= deficit * 0.5  
-        # Higher reward for optimal inventory level (further doubled)
+            reward -= deficit * 0.25  
+        # Higher reward for optimal inventory level (reduced)
         if sku.safety_stock <= current_stock <= sku.max_stock:
-            reward += 400  
-        # Additional reward for maintaining good service level (further doubled)
+            reward += 200  
+        # Additional reward for maintaining good service level (reduced)
         if sku.total_demand > 0:
             service_level = sku.fulfilled_demand / sku.total_demand
             if service_level >= 0.99:
-                reward += 800  
-            elif service_level >= 0.90:
                 reward += 400  
+            elif service_level >= 0.90:
+                reward += 200  
         # Add a minimum reward floor to prevent extreme negatives as was the case observed in some runs of the simulation.
-        reward = max(reward, -50)
+        reward = max(reward, -25)
         return reward
+
+    def calculate_rop(self, sku: SKUData, location: str = 'warehouse') -> int:
+        """Calculate reorder point for warehouse or retail."""
+        if location == 'warehouse':
+            # ROP = demand during lead time + safety stock
+            lead_time = sku.lead_time_days
+            avg_daily_demand = sku.base_demand
+        elif location == 'retail':
+            lead_time = sku.retail_lead_time_days
+            avg_daily_demand = sku.base_demand
+        else:
+            raise ValueError('Unknown location for ROP calculation')
+        demand_during_lead_time = avg_daily_demand * lead_time
+        if location == 'warehouse':
+            return int(np.ceil(demand_during_lead_time + sku.safety_stock))
+        else:
+            # For retail, use a smaller safety stock if needed
+            return int(np.ceil(demand_during_lead_time + max(1, sku.safety_stock // 2)))
 
     def _get_state(self):
         """Return the current state (inventory levels for all SKUs, warehouse and retail)"""
@@ -313,21 +344,19 @@ class InventoryEnvironment(gym.Env):
         return np.array(state, dtype=np.int32)
 
     def _replenish_retail(self, sku_id: str, demand: int):
-        """Replenish retail stock from the primary warehouse location only."""
+        """Replenish retail stock from the primary warehouse location only, respecting warehouse safety stock."""
         sku = self.skus[sku_id]
         total_replenished = 0
-
-        #To be updated
         primary_location = self.inventory_locations[sku.inventory_location]
-        if sku.current_stock > 0:
-            replenishment = min(demand, sku.current_stock)
+        # Only allow transfer if warehouse will retain at least safety stock after transfer
+        available_to_transfer = max(0, sku.current_stock - sku.safety_stock)
+        replenishment = min(demand, available_to_transfer)
+        if replenishment > 0:
             sku.retail_stock += replenishment
             sku.current_stock -= replenishment
             primary_location.current_stock[sku_id] = sku.current_stock
             total_replenished += replenishment
-            demand -= replenishment 
-        
-        # No fallback to other locations
+            demand -= replenishment
         return total_replenished
 
     def step(self, action):
@@ -349,11 +378,15 @@ class InventoryEnvironment(gym.Env):
                 arrivals = [item for item in sku.retail_replenishment_queue if item[0] <= current_time]
                 sku.retail_replenishment_queue = [item for item in sku.retail_replenishment_queue if item[0] > current_time]
                 for arrival_time, amount in arrivals:
-                    # Only replenish from Location (warehouse) to Retail for this SKU
-                    actual_amount = min(amount, sku.current_stock)
+                    # Only replenish from Location (warehouse) to Retail for this SKU, respecting safety stock
+                    available_to_transfer = max(0, sku.current_stock - sku.safety_stock)
+                    actual_amount = min(amount, available_to_transfer)
                     sku.retail_stock += actual_amount
                     sku.current_stock -= actual_amount
                     self.inventory_locations[sku.inventory_location].current_stock[sku_id] = sku.current_stock
+                    sku.open_pos_warehouse_to_retail += actual_amount
+                    if sku.open_pos_warehouse_to_retail < 0:
+                        sku.open_pos_warehouse_to_retail = 0
         
         for i, (sku_id, sku) in enumerate(self.skus.items()):
             # Shelf life check: if shelf_life_days < lead_time_days, treat as stockout
@@ -363,12 +396,12 @@ class InventoryEnvironment(gym.Env):
             # --- Supplier to Location (warehouse) ---
             if order_qty_warehouse[i] > 0:
                 
-                if sku.current_stock < sku.reorder_point 
+                if sku.current_stock < sku.reorder_point:
                     base_order = max(order_qty_warehouse[i], sku.min_order_qty)
-                    available_capacity = sku.max_stock - (sku.current_stock + sku.open_pos)
+                    available_capacity = sku.max_stock - (sku.current_stock + sku.open_pos_supplier_to_warehouse)
                     order_qty = min(base_order, available_capacity)
                     if order_qty > 0:
-                        sku.open_pos += order_qty #Order placed is updated
+                        sku.open_pos_supplier_to_warehouse += order_qty
                         self.inventory_locations[sku.inventory_location].current_stock[sku_id] += 0  # No immediate stock
             # --- Demand realization and fulfillment at Retail for this SKU ---
             period_demand = self.calculate_demand_for_period(
@@ -396,12 +429,12 @@ class InventoryEnvironment(gym.Env):
             else:
                 service_levels[sku_id] = 1.0
             # --- Supplier delivery to Location (warehouse) for this SKU ---
-            if sku.open_pos > 0 and self._is_delivery_due(sku, current_time):
+            if sku.open_pos_supplier_to_warehouse > 0 and self._is_delivery_due(sku, current_time):
                 sku.replenishment_cycles += 1
-                sku.current_stock += sku.open_pos
-                self.inventory_locations[sku.inventory_location].current_stock[sku_id] += sku.open_pos
-                supplier_loads[sku.supplier] += sku.open_pos
-                sku.open_pos = 0
+                sku.current_stock += sku.open_pos_supplier_to_warehouse
+                self.inventory_locations[sku.inventory_location].current_stock[sku_id] += sku.open_pos_supplier_to_warehouse
+                supplier_loads[sku.supplier] += sku.open_pos_supplier_to_warehouse
+                sku.open_pos_supplier_to_warehouse = 0
             # --- Location to Retail replenishment trigger for this SKU ---
             if sku_id == 'Type_C':
                 retail_threshold = max(1, int(1.0 * sku.base_demand))
@@ -410,10 +443,13 @@ class InventoryEnvironment(gym.Env):
                 retail_threshold = max(1, int(1.2 * sku.base_demand))
                 target_retail = max(1, int(2.2 * sku.base_demand))
             if sku.retail_stock < retail_threshold:
-                replenish_amount = min(target_retail - sku.retail_stock, sku.current_stock)
+                # Only allow transfer if warehouse will retain at least safety stock after transfer
+                available_to_transfer = max(0, sku.current_stock - sku.safety_stock)
+                replenish_amount = min(target_retail - sku.retail_stock, available_to_transfer)
                 if replenish_amount > 0:
                     arrival_time = current_time + sku.retail_lead_time_days
                     sku.retail_replenishment_queue.append((arrival_time, replenish_amount))
+                    sku.open_pos_warehouse_to_retail += replenish_amount
             sku.previous_demand = period_demand
             sku.last_decision_time = current_time
             rewards[i] = self.calculate_reward(
@@ -431,7 +467,9 @@ class InventoryEnvironment(gym.Env):
             self.suppliers[supplier_id]['reliability'] = max(0.7, 0.95 - 0.1 * self.suppliers[supplier_id]['current_load'])
         # Update info dictionary (all per-SKU)
         info = {
-            'warehouse_stock': {sku_id: sku.current_stock for sku_id, sku in self.skus.items()},
+            'Location_1_stock': {sku_id: sku.current_stock for sku_id, sku in self.skus.items()},
+            'Location_2_stock': {sku_id: sku.current_stock for sku_id, sku in self.skus.items()},
+            'Location_3_stock': {sku_id: sku.current_stock for sku_id, sku in self.skus.items()},
             'retail_stock': {sku_id: sku.retail_stock for sku_id, sku in self.skus.items()},
             'open_pos': {sku_id: sku.open_pos for sku_id, sku in self.skus.items()},
             'stockouts': stockouts,
@@ -441,6 +479,8 @@ class InventoryEnvironment(gym.Env):
             'time_deltas': time_deltas,
             'current_time': current_time,
             'lead_times': {sku_id: sku.lead_time_days for sku_id, sku in self.skus.items()},
+            'open_pos_supplier_to_warehouse': {sku_id: sku.open_pos_supplier_to_warehouse for sku_id, sku in self.skus.items()},
+            'open_pos_warehouse_to_retail': {sku_id: sku.open_pos_warehouse_to_retail for sku_id, sku in self.skus.items()},
         }
         self.config['current_time'] += self.config['min_decision_interval']
         done = False
@@ -499,6 +539,10 @@ class InventoryEnvironment(gym.Env):
             self.skus[sku_id].replenishment_cycles = 0
             self.skus[sku_id].previous_demand = 0.0
             self.skus[sku_id].retail_replenishment_queue = []
+            self.skus[sku_id].open_pos_supplier_to_warehouse = 0
+            self.skus[sku_id].open_pos_warehouse_to_retail = 0
+            # Calculate and store retail reorder point
+            self.skus[sku_id].retail_reorder_point = self.calculate_rop(sku, location='retail')
         # Reset supplier loads
         for supplier in self.suppliers.values():
             supplier['current_load'] = 0
