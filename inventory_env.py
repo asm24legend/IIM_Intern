@@ -60,7 +60,7 @@ class InventoryEnvironment(gym.Env):
             
             'retail_replenishment_time': 1,  # Days to replenish retail from warehouse
             'noise_std': 10,
-            'min_decision_interval': 0.1,  # Minimum time between decisions (in days)
+            'min_decision_interval': 1,  # Minimum time between decisions (in days)
             'current_time': 0.0,  # Current simulation time in days (float)
             
             'use_fixed_demand': False,      # Toggle for benchmarking
