@@ -11,6 +11,7 @@ from datetime import datetime
 import pickle
 import csv
 
+#Ensures that Numpy object types are converted to JSON format without throwing errors
 def convert_to_serializable(obj):
     """Convert numpy types to native Python types for JSON serialization"""
     if isinstance(obj, np.integer):
@@ -24,7 +25,11 @@ def convert_to_serializable(obj):
     elif isinstance(obj, list):
         return [convert_to_serializable(item) for item in obj]
     return obj
-
+#Plots four main plots to evaluate key RL performance metrics 
+#rewards: list of total rewards per episode.
+#td_errors: list of average temporal-difference (TD) errors per episode.
+#metrics: list of dictionaries per episode with additional metrics like service level and stockouts.
+#save_dir: directory path where the plot image will be saved.
 def plot_training_progress(rewards, td_errors, metrics, save_dir):
     """Plot training metrics"""
     # Create subplots
@@ -64,6 +69,7 @@ def plot_training_progress(rewards, td_errors, metrics, save_dir):
     plt.savefig(os.path.join(save_dir, 'training_progress.png'))
     plt.close()
 
+#Helps to study trends over time
 def plot_moving_average(data, window, title, ylabel, save_path):
     """Plot moving average for a given data series."""
     moving_avg = np.convolve(data, np.ones(window)/window, mode='valid')
@@ -76,6 +82,7 @@ def plot_moving_average(data, window, title, ylabel, save_path):
     plt.savefig(save_path)
     plt.close()
 
+#Core training loop
 def train(env, agent, num_episodes=100, max_steps=5000):
     """Train the agent"""
     rewards_history = []
@@ -84,12 +91,12 @@ def train(env, agent, num_episodes=100, max_steps=5000):
     episode_lengths = []
     pbar = tqdm(range(num_episodes), desc="Training Progress")
     for episode in pbar:
-        state = env.reset()
+        state = env.reset()  #Resets the environment at the beginning of each episode.
         done = False
-        episode_reward = 0
-        episode_steps = 0
+        episode_reward = 0 #Tracks the cumulative reward collected during this episode.Updates after every step
+        episode_steps = 0 #Tracks how many steps the agent has taken in this episode.
         episode_metrics = {
-            'stockouts': {},
+            'stockouts': {}, #Tracks stockouts at each location
             'location_stockouts': {
                 'Location_1': 0,
                 'Location_2': 0,
@@ -97,12 +104,17 @@ def train(env, agent, num_episodes=100, max_steps=5000):
                 'Retail': 0
             },
             'service_level': 0,
-            'warehouse_levels': {},
+            'warehouse_levels': {
+    'Location_1': {},
+    'Location_2': {},
+    'Location_3': {}
+            },
+
             'retail_levels': {},
             'supplier_reliability': {}
         }
         while not done and episode_steps < max_steps:
-            # Get action from agent (now only order quantities)
+            # Get action from agent (nonly order quantities)
             action = agent.get_action(state, env)
             # Take action in environment
             next_state, reward, done, info = env.step(action)
@@ -118,8 +130,13 @@ def train(env, agent, num_episodes=100, max_steps=5000):
                 if sku.retail_stock <= 0:
                     episode_metrics['location_stockouts']['Retail'] += stockout
             for sku_id in env.skus:
-                if sku_id not in episode_metrics['warehouse_levels']:
-                    episode_metrics['warehouse_levels'][sku_id] = []
+                location = env.skus[sku_id].inventory_location
+                if sku_id not in episode_metrics['warehouse_levels'][location]:
+                episode_metrics['warehouse_levels'][location][sku_id] = []
+                episode_metrics['warehouse_levels'][location][sku_id].append(
+                int(info['warehouse_stock'][sku_id])
+               )
+
                 if sku_id not in episode_metrics['retail_levels']:
                     episode_metrics['retail_levels'][sku_id] = []
                 episode_metrics['warehouse_levels'][sku_id].append(int(info['warehouse_stock'][sku_id]))
