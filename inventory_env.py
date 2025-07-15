@@ -17,13 +17,13 @@ class SKUData:
     safety_stock: int  #Amount of minimum inventory that should be there
     lead_time_days: int #Number of days required for order fulfillment  
     max_stock: int #Maximum amount of stock that can be there in an inventory
-    min_order_qty: int
-    inventory_location: str
-    supplier: str
-    open_pos: int
+    min_order_qty: int #Minimum quantity that can be ordered at a given time
+    inventory_location: str #A, B, C are warehouses
+    supplier: str #Supplier X, Y and Z initialized
+    open_pos: int #Number of open purchase orders, stock ordered but not yet arrived, in transit stuff
     last_order_date: datetime  
     next_delivery_date: datetime  
-    previous_demand: float = 0
+    previous_demand: float = 0 #Demand in the previous time range
     retail_stock: int = 0  # Stock at retail store
     # Add ABC classification and value
     abc_class: str = 'C'  # A, B, or C classification
@@ -71,18 +71,18 @@ class InventoryEnvironment(gym.Env):
         self.inventory_locations = {
             'Location_1': InventoryLocation(
                 name='Location_1',
-                sku_types=['Type_A'],
-                capacity=1000,
-                current_stock={'Type_A': 450}
+                sku_types=['Type_A'], #High value, low demand items
+                capacity=1000, 
+                current_stock={'Type_A': 450} #Initial stock
             ),
             'Location_2': InventoryLocation(
                 name='Location_2',
-                sku_types=['Type_B'],
+                sku_types=['Type_B'], #Medium value. Medium demand
                 capacity=800,
-                current_stock={'Type_B': 350}
+                current_stock={'Type_B': 350} 
             ),
             'Location_3': InventoryLocation(
-                name='Location_3',
+                name='Location_3', #Low value, low demand
                 sku_types=['Type_C'],
                 capacity=600,
                 current_stock={'Type_C': 250}
@@ -194,14 +194,15 @@ class InventoryEnvironment(gym.Env):
         
         num_skus = len(self.skus)
         
-        # New action space: order for warehouse for each SKU (no lead time reductions)
+        # New action space: order for warehouse for each SKU (no lead time reductions) and also does not include the retail order quantities because they are decided by the warehouse level quantity.
+
         self.action_space = spaces.Box(
             low=np.zeros(num_skus, dtype=np.int32),
             high=np.array([self.config['max_inventory']] * num_skus, dtype=np.int32),
             dtype=np.int32
         )
         
-        # Initialize observation space
+        # Initialize observation space. Information visible to the agent in order to take decisions.
         self.observation_space = spaces.Dict({
             'warehouse_stock': spaces.Box(low=0, high=self.config['max_inventory'], shape=(num_skus,), dtype=np.int32),
             'retail_stock': spaces.Box(low=0, high=self.config['max_inventory'], shape=(num_skus,), dtype=np.int32),
@@ -261,44 +262,44 @@ class InventoryEnvironment(gym.Env):
         criticality_multiplier = 2.0 if sku.abc_class == 'A' else (1.5 if sku.abc_class == 'B' else 1.0)
         if stockout > 0:
             if sku.inventory_location == 'Location_1':
-                reward -= 25 * stockout * criticality_multiplier  # Was 50
+                reward -= 25 * stockout * criticality_multiplier 
             elif sku.inventory_location == 'Location_2':
-                reward -= 20 * stockout * criticality_multiplier   # Was 40
+                reward -= 20 * stockout * criticality_multiplier   
             elif sku.inventory_location == 'Location_3':
-                reward -= 15 * stockout * criticality_multiplier   # Was 30
-            # Retail penalty further reduced
+                reward -= 15 * stockout * criticality_multiplier  
+            # Retail penalty 
             if sku.retail_stock <= 0:
-                reward -= 375 * stockout * criticality_multiplier  # Was 750
+                reward -= 375 * stockout * criticality_multiplier  
         else:
-            # Higher rewards for fulfillment (further doubled)
+            # Higher rewards for fulfillment 
             if sku.inventory_location == 'Location_1':
-                reward += 400  # Was 200
+                reward += 400  
             elif sku.inventory_location == 'Location_2':
-                reward += 320   # Was 160
+                reward += 320   
             elif sku.inventory_location == 'Location_3':
-                reward += 240   # Was 120
+                reward += 240   
             if sku.retail_stock > 0:
-                reward += 400  # Was 200
-        # Inventory level management (penalties further reduced, rewards further increased)
-        # Penalty for excess inventory (halved again)
+                reward += 400  
+        
+        # Penalty for excess inventory 
         if current_stock > sku.max_stock:
             excess = current_stock - sku.max_stock
-            reward -= excess * 0.0125  # Was 0.025
-        # Penalty for being below safety stock (halved again)
+            reward -= excess * 0.0125  
+        # Penalty for being below safety stock 
         elif current_stock < sku.safety_stock:
             deficit = sku.safety_stock - current_stock
-            reward -= deficit * 0.5  # Was 1.0
+            reward -= deficit * 0.5  
         # Higher reward for optimal inventory level (further doubled)
         if sku.safety_stock <= current_stock <= sku.max_stock:
-            reward += 400  # Was 200
+            reward += 400  
         # Additional reward for maintaining good service level (further doubled)
         if sku.total_demand > 0:
             service_level = sku.fulfilled_demand / sku.total_demand
-            if service_level >= 0.95:
-                reward += 800  # Was 400
+            if service_level >= 0.99:
+                reward += 800  
             elif service_level >= 0.90:
-                reward += 400  # Was 200
-        # Add a minimum reward floor to prevent extreme negatives
+                reward += 400  
+        # Add a minimum reward floor to prevent extreme negatives as was the case observed in some runs of the simulation.
         reward = max(reward, -50)
         return reward
 
@@ -315,8 +316,8 @@ class InventoryEnvironment(gym.Env):
         """Replenish retail stock from the primary warehouse location only."""
         sku = self.skus[sku_id]
         total_replenished = 0
-        
-        # Only replenish from the primary location
+
+        #To be updated
         primary_location = self.inventory_locations[sku.inventory_location]
         if sku.current_stock > 0:
             replenishment = min(demand, sku.current_stock)
@@ -324,7 +325,7 @@ class InventoryEnvironment(gym.Env):
             sku.current_stock -= replenishment
             primary_location.current_stock[sku_id] = sku.current_stock
             total_replenished += replenishment
-            demand -= replenishment
+            demand -= replenishment 
         
         # No fallback to other locations
         return total_replenished
@@ -353,7 +354,7 @@ class InventoryEnvironment(gym.Env):
                     sku.retail_stock += actual_amount
                     sku.current_stock -= actual_amount
                     self.inventory_locations[sku.inventory_location].current_stock[sku_id] = sku.current_stock
-        # --- Handle each SKU independently: Supplier -> Location -> Retail ---
+        
         for i, (sku_id, sku) in enumerate(self.skus.items()):
             # Shelf life check: if shelf_life_days < lead_time_days, treat as stockout
             shelf_life_stockout = 0
@@ -361,13 +362,13 @@ class InventoryEnvironment(gym.Env):
                 shelf_life_stockout = 1
             # --- Supplier to Location (warehouse) ---
             if order_qty_warehouse[i] > 0:
-                # Use reorder_point directly since calculate_rop is removed
-                if sku.current_stock < sku.reorder_point and sku.current_stock < sku.max_stock:
+                
+                if sku.current_stock < sku.reorder_point 
                     base_order = max(order_qty_warehouse[i], sku.min_order_qty)
                     available_capacity = sku.max_stock - (sku.current_stock + sku.open_pos)
                     order_qty = min(base_order, available_capacity)
                     if order_qty > 0:
-                        sku.open_pos += order_qty
+                        sku.open_pos += order_qty #Order placed is updated
                         self.inventory_locations[sku.inventory_location].current_stock[sku_id] += 0  # No immediate stock
             # --- Demand realization and fulfillment at Retail for this SKU ---
             period_demand = self.calculate_demand_for_period(
@@ -375,7 +376,7 @@ class InventoryEnvironment(gym.Env):
                 sku.last_decision_time,
                 current_time
             )
-            # --- Update demand history for dynamic gamma forecasting ---
+            # --- Update demand history 
             sku.demand_history.append(period_demand)
             if len(sku.demand_history) > sku.demand_window:
                 sku.demand_history = sku.demand_history[-sku.demand_window:]
@@ -446,10 +447,10 @@ class InventoryEnvironment(gym.Env):
         if any(sku.retail_stock <= 0 for sku in self.skus.values()):
             done = True
             rewards -= 20
-        # After reward calculation, adjust service level penalty (halved again)
+        # After reward calculation, adjust service level penalty 
         avg_service_level = np.mean(list(service_levels.values()))
-        if avg_service_level < 0.95:
-            penalty = -250 * (0.98 - avg_service_level)  # Was -500
+        if avg_service_level < 0.99:
+            penalty = -250 * (0.99 - avg_service_level)  # Was -500
             rewards += penalty
         # Ensure rewards are not NaN or inf, and clip total reward
         total_reward = np.sum(rewards)
@@ -457,7 +458,7 @@ class InventoryEnvironment(gym.Env):
             total_reward = 0.0
         total_reward = np.clip(total_reward, -1000, 2000)
         return self._get_state(), total_reward, done, info
-    
+    #High safety stock for Type C is strongly indicated in the results where C experiences nearly zero stockouts.
     def calculate_dynamic_safety_stock(self, sku, z=None):
         """Calculate safety stock accurately based on demand variability and lead time, using fixed gamma params."""
         if z is None:
@@ -502,7 +503,7 @@ class InventoryEnvironment(gym.Env):
         for supplier in self.suppliers.values():
             supplier['current_load'] = 0
         return self._get_state()
-    
+    # Update the lead times and the delivery dates 
     def _is_delivery_due(self, sku: SKUData, current_time: float) -> bool:
         """Check if delivery is due for a SKU based on simulation time"""
         if not sku.next_delivery_date:
