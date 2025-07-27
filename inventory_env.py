@@ -62,7 +62,7 @@ class InventoryEnvironment(gym.Env):
             'max_inventory': 1000,
             
             'retail_replenishment_time': 1,  # Days to replenish retail from warehouse
-            'noise_std': 10,
+            'noise_std': 5,  # Reduced from 10 to 5 for more stable environment
             'min_decision_interval': 1,  # Minimum time between decisions (in days)
             'current_time': 0.0,  # Current simulation time in days (float)
             
@@ -107,7 +107,7 @@ class InventoryEnvironment(gym.Env):
                 current_stock=120,
                 reorder_point=40,
                 safety_stock=20,
-                lead_time_days=3,
+                lead_time_days=2,  # Reduced from 3 to 2
                 
                 max_stock=170,
                 min_order_qty=10,
@@ -115,14 +115,14 @@ class InventoryEnvironment(gym.Env):
                 supplier='Supplier_X',
                 open_pos=0,
                 last_order_date=base_date,
-                next_delivery_date=base_date + timedelta(days=3),
+                next_delivery_date=base_date + timedelta(days=2),
                 retail_stock=40,
                 base_demand=50,
                 abc_class='A',
                 last_decision_time=0.0,
-                alpha=2.0,
-                beta=2.0,
-                retail_lead_time_days=2,
+                alpha=5.0,  # Increased from 2.0 to 5.0 for more stable demand
+                beta=1.0,   # Reduced from 2.0 to 1.0 for more stable demand
+                retail_lead_time_days=1,  # Reduced from 2 to 1
                 open_pos_supplier_to_warehouse=0,
                 open_pos_warehouse_to_retail=0,
                 retail_reorder_point=0
@@ -133,7 +133,7 @@ class InventoryEnvironment(gym.Env):
                 current_stock=350,
                 reorder_point=120,
                 safety_stock=60,
-                lead_time_days=7,
+                lead_time_days=4,  # Reduced from 7 to 4
                 
                 max_stock=450,
                 min_order_qty=40,
@@ -141,14 +141,14 @@ class InventoryEnvironment(gym.Env):
                 supplier='Supplier_Y',
                 open_pos=0,
                 last_order_date=base_date,
-                next_delivery_date=base_date + timedelta(days=7),
+                next_delivery_date=base_date + timedelta(days=4),
                 retail_stock=75,
                 base_demand=200,
                 abc_class='B',
                 last_decision_time=0.0,
-                alpha=2.0,
-                beta=2.0,
-                retail_lead_time_days=3,
+                alpha=8.0,  # Increased from 2.0 to 8.0 for more stable demand
+                beta=1.0,   # Reduced from 2.0 to 1.0 for more stable demand
+                retail_lead_time_days=2,  # Reduced from 3 to 2
                 open_pos_supplier_to_warehouse=0,
                 open_pos_warehouse_to_retail=0,
                 retail_reorder_point=0
@@ -172,8 +172,8 @@ class InventoryEnvironment(gym.Env):
                 base_demand=1000,
                 abc_class='C',
                 last_decision_time=0.0,
-                alpha=2.0,
-                beta=2.0,
+                alpha=20.0,  # Increased from 2.0 to 20.0 for more stable demand
+                beta=1.0,    # Reduced from 2.0 to 1.0 for more stable demand
                 retail_lead_time_days=1,
                 open_pos_supplier_to_warehouse=0,
                 open_pos_warehouse_to_retail=0,
@@ -185,19 +185,19 @@ class InventoryEnvironment(gym.Env):
         # Initialize suppliers with their capabilities and products
         self.suppliers = {
             'Supplier_X': {
-                'lead_time_range': (2, 10),
+                'lead_time_range': (1, 4),  # Reduced from (2, 10) to (1, 4)
                 'current_load': 0,
                 'reliability': 0.95,
                 'products': ['Type_A']
             },
             'Supplier_Y': {
-                'lead_time_range': (5,10),
+                'lead_time_range': (2, 6),  # Reduced from (5, 10) to (2, 6)
                 'current_load': 0,
                 'reliability': 0.90,
                 'products': ['Type_B']  # Only Type_B now
             },
             'Supplier_Z': {
-                'lead_time_range': (6,10),
+                'lead_time_range': (1, 3),  # Reduced from (6, 10) to (1, 3)
                 'current_load': 0,
                 'reliability': 0.92,
                 'products': ['Type_C']  # New supplier for Type_C
@@ -276,28 +276,28 @@ class InventoryEnvironment(gym.Env):
         criticality_multiplier = 2.0 if sku.abc_class == 'A' else (1.5 if sku.abc_class == 'B' else 1.0)
         if stockout > 0:
             if sku.inventory_location == 'Location_1':
-                reward -= 12.5 * stockout * criticality_multiplier 
+                reward -= 5.0 * stockout * criticality_multiplier  # Reduced from 12.5
             elif sku.inventory_location == 'Location_2':
-                reward -= 10 * stockout * criticality_multiplier   
+                reward -= 4.0 * stockout * criticality_multiplier  # Reduced from 10
             elif sku.inventory_location == 'Location_3':
-                reward -= 7.5 * stockout * criticality_multiplier  
+                reward -= 3.0 * stockout * criticality_multiplier  # Reduced from 7.5
             # Retail penalty 
             if sku.retail_stock <= 0:
-                reward -= 187.5 * stockout * criticality_multiplier  
+                reward -= 15.0 * stockout * criticality_multiplier  # Reduced from 187.5
         else:
             # Higher rewards for fulfillment (reduced)
             if sku.inventory_location == 'Location_1':
-                reward += 200  
+                reward += 10.0  # Reduced from 200
             elif sku.inventory_location == 'Location_2':
-                reward += 160   
+                reward += 8.0   # Reduced from 160
             elif sku.inventory_location == 'Location_3':
-                reward += 120   
+                reward += 6.0   # Reduced from 120
             if sku.retail_stock > 0:
-                reward += 200  
+                reward += 10.0  # Reduced from 200
         # Penalty for excess inventory (reduced)
         if current_stock > sku.max_stock:
             excess = current_stock - sku.max_stock
-            reward -= excess * 0.00625  
+            reward -= excess * 0.01  # Reduced from 0.00625
         # Penalty for being below safety stock (reduced)
         elif current_stock < sku.safety_stock:
             deficit = sku.safety_stock - current_stock

@@ -10,6 +10,7 @@ import os
 from datetime import datetime
 import pickle
 import csv
+import pandas as pd
 
 #Ensures that Numpy object types are converted to JSON format without throwing errors
 def convert_to_serializable(obj):
@@ -31,55 +32,74 @@ def convert_to_serializable(obj):
 #metrics: list of dictionaries per episode with additional metrics like service level and stockouts.
 #save_dir: directory path where the plot image will be saved.
 def plot_training_progress(rewards, td_errors, metrics, save_dir):
-    """Plot training metrics"""
-    # Create subplots
-    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+    """Plot training metrics with improved visibility"""
+    # Create subplots with better spacing
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
     
-    # Plot rewards
-    ax1.plot(rewards)
-    ax1.set_title('Training Rewards')
-    ax1.set_xlabel('Episode')
-    ax1.set_ylabel('Total Reward')
+    # Plot rewards with improved styling
+    ax1.plot(rewards, color='#2E86AB', linewidth=1.5, alpha=0.8)
+    ax1.set_title('Training Rewards', fontsize=14, fontweight='bold')
+    ax1.set_xlabel('Episode', fontsize=12)
+    ax1.set_ylabel('Total Reward', fontsize=12)
+    ax1.grid(True, alpha=0.3)
+    ax1.set_ylim(bottom=min(rewards) * 0.9, top=max(rewards) * 1.1)
     
-    # Plot TD errors
-    ax2.plot(td_errors)
-    ax2.set_title('TD Errors')
-    ax2.set_xlabel('Episode')
-    ax2.set_ylabel('Average TD Error')
+    # Plot TD errors with improved styling
+    ax2.plot(td_errors, color='#A23B72', linewidth=1.5, alpha=0.8)
+    ax2.set_title('TD Errors', fontsize=14, fontweight='bold')
+    ax2.set_xlabel('Episode', fontsize=12)
+    ax2.set_ylabel('Average TD Error', fontsize=12)
+    ax2.grid(True, alpha=0.3)
+    # Use log scale for TD errors if they vary widely
+    if max(td_errors) > 10 * min(td_errors):
+        ax2.set_yscale('log')
     
-    # Plot service levels
+    # Plot service levels with improved styling
     service_levels = [m['service_level'] for m in metrics]
-    ax3.plot(service_levels)
-    ax3.set_title('Service Level')
-    ax3.set_xlabel('Episode')
-    ax3.set_ylabel('Service Level (%)')
+    ax3.plot(service_levels, color='#F18F01', linewidth=1.5, alpha=0.8)
+    ax3.set_title('Service Level', fontsize=14, fontweight='bold')
+    ax3.set_xlabel('Episode', fontsize=12)
+    ax3.set_ylabel('Service Level (%)', fontsize=12)
+    ax3.grid(True, alpha=0.3)
+    ax3.set_ylim(0, 100)
     
-    # Plot stockouts by location
+    # Plot stockouts by location with improved styling
     locations = ['Location_1', 'Location_2', 'Location_3', 'Retail']
-    for location in locations:
+    colors = ['#C73E1D', '#3B1F2B', '#6A994E', '#A7C957']
+    for i, location in enumerate(locations):
         stockouts = [m['location_stockouts'][location] for m in metrics]
-        ax4.plot(stockouts, label=location)
-    ax4.set_title('Stockouts per Location')
-    ax4.set_xlabel('Episode')
-    ax4.set_ylabel('Number of Stockouts')
-    ax4.legend()
+        ax4.plot(stockouts, label=location, color=colors[i], linewidth=1.5, alpha=0.8)
+    ax4.set_title('Stockouts per Location', fontsize=14, fontweight='bold')
+    ax4.set_xlabel('Episode', fontsize=12)
+    ax4.set_ylabel('Number of Stockouts', fontsize=12)
+    ax4.legend(fontsize=10)
+    ax4.grid(True, alpha=0.3)
     
-    plt.tight_layout()
+    plt.tight_layout(pad=3.0)
     os.makedirs(save_dir, exist_ok=True)
-    plt.savefig(os.path.join(save_dir, 'training_progress.png'))
+    plt.savefig(os.path.join(save_dir, 'training_progress.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
 #Helps to study trends over time
 def plot_moving_average(data, window, title, ylabel, save_path):
-    """Plot moving average for a given data series."""
+    """Plot moving average for a given data series with improved styling."""
     moving_avg = np.convolve(data, np.ones(window)/window, mode='valid')
-    plt.figure(figsize=(10, 6))
-    plt.plot(moving_avg)
-    plt.title(title)
-    plt.xlabel('Episode')
-    plt.ylabel(ylabel)
+    plt.figure(figsize=(12, 8))
+    plt.plot(moving_avg, color='#2E86AB', linewidth=2, alpha=0.8)
+    plt.title(title, fontsize=16, fontweight='bold')
+    plt.xlabel('Episode', fontsize=14)
+    plt.ylabel(ylabel, fontsize=14)
+    plt.grid(True, alpha=0.3)
+    
+    # Add trend line
+    x = np.arange(len(moving_avg))
+    z = np.polyfit(x, moving_avg, 1)
+    p = np.poly1d(z)
+    plt.plot(x, p(x), "--", color='#A23B72', linewidth=1.5, alpha=0.7, label=f'Trend (slope: {z[0]:.4f})')
+    plt.legend(fontsize=12)
+    
     plt.tight_layout()
-    plt.savefig(save_path)
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close()
 
 #Core training loop
@@ -220,38 +240,60 @@ def evaluate(env, agent, num_episodes=100, max_steps=500, episode_lengths_overri
     return eval_metrics
 
 def plot_cumulative_reward(eval_metrics, save_dir):
-    """Plot the cumulative reward as a function of the number of steps."""
+    """Plot the cumulative reward as a function of the number of steps with improved styling."""
     rewards = eval_metrics['rewards']
     cumulative_rewards = np.cumsum(rewards)
     steps = np.arange(1, len(cumulative_rewards) + 1)
-    plt.figure(figsize=(10, 6))
-    plt.plot(steps, cumulative_rewards, label='Cumulative Reward')
-    plt.xlabel('Episode')
-    plt.ylabel('Cumulative Reward')
-    plt.title('Cumulative Reward Over Episodes')
-    plt.legend()
+    
+    plt.figure(figsize=(12, 8))
+    plt.plot(steps, cumulative_rewards, color='#2E86AB', linewidth=2, alpha=0.8, label='Cumulative Reward')
+    
+    # Add trend line
+    z = np.polyfit(steps, cumulative_rewards, 1)
+    p = np.poly1d(z)
+    plt.plot(steps, p(steps), "--", color='#A23B72', linewidth=1.5, alpha=0.7, 
+             label=f'Trend (avg reward/episode: {z[0]:.2f})')
+    
+    plt.xlabel('Episode', fontsize=14)
+    plt.ylabel('Cumulative Reward', fontsize=14)
+    plt.title('Cumulative Reward Over Episodes', fontsize=16, fontweight='bold')
+    plt.legend(fontsize=12)
+    plt.grid(True, alpha=0.3)
+    
+    # Set y-axis limits for better visibility
+    plt.ylim(bottom=0, top=max(cumulative_rewards) * 1.05)
+    
     plt.tight_layout()
     os.makedirs(save_dir, exist_ok=True)
-    plt.savefig(os.path.join(save_dir, 'cumulative_reward.png'))
+    plt.savefig(os.path.join(save_dir, 'cumulative_reward.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
 def plot_location_stockouts(eval_metrics, save_dir):
-    """Plot stockouts by location"""
-    plt.figure(figsize=(12, 6))
+    """Plot stockouts by location with improved styling"""
+    plt.figure(figsize=(14, 8))
     
     locations = ['Location_1', 'Location_2', 'Location_3', 'Retail']
-    for location in locations:
-        stockouts = eval_metrics['location_stockouts'][location]
-        plt.plot(stockouts, label=location)
+    colors = ['#C73E1D', '#3B1F2B', '#6A994E', '#A7C957']
     
-    plt.xlabel('Episode')
-    plt.ylabel('Number of Stockouts')
-    plt.title('Stockouts by Location')
-    plt.legend()
-    plt.grid(True)
+    for i, location in enumerate(locations):
+        stockouts = eval_metrics['location_stockouts'][location]
+        plt.plot(stockouts, label=location, color=colors[i], linewidth=1.5, alpha=0.8)
+    
+    plt.xlabel('Episode', fontsize=14)
+    plt.ylabel('Number of Stockouts', fontsize=14)
+    plt.title('Stockouts by Location', fontsize=16, fontweight='bold')
+    plt.legend(fontsize=12)
+    plt.grid(True, alpha=0.3)
+    
+    # Set y-axis limits for better visibility
+    all_stockouts = []
+    for location in locations:
+        all_stockouts.extend(eval_metrics['location_stockouts'][location])
+    plt.ylim(bottom=0, top=max(all_stockouts) * 1.1)
+    
     plt.tight_layout()
     os.makedirs(save_dir, exist_ok=True)
-    plt.savefig(os.path.join(save_dir, 'location_stockouts.png'))
+    plt.savefig(os.path.join(save_dir, 'location_stockouts.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
 def export_q_table_to_csv(q_table_path, csv_path):
@@ -275,25 +317,19 @@ class RandomAgent:
         self.env = env
         self.action_space = env.action_space
     def get_action(self, state, env=None, greedy=False):
-        # Simple order-up-to policy: order enough to reach reorder_point if below, else order 0.
         num_skus = len(self.env.skus)
+        num_locations = len(state) // num_skus
         order_quantities = np.zeros(num_skus, dtype=np.int32)
         lead_time_reductions = np.zeros(num_skus, dtype=np.int32)
         for i, sku_id in enumerate(self.env.skus):
             sku = self.env.skus[sku_id]
-            Location_1_stock = state[2*i]
-            Location_2_stock = state[2*i+1]
-            Location_3_stock = state[2*i+2]
-            target_level = sku.reorder_point  # or use sku.max_stock for a more aggressive policy
-            if Location_1_stock < target_level:
-                order_quantities[i] = target_level - Location_1_stock
-            elif Location_2_stock < target_level:
-                order_quantities[i] = target_level - Location_2_stock
-            elif Location_3_stock < target_level:
-                order_quantities[i] = target_level - Location_3_stock
+            sku_stocks = state[i*num_locations:(i+1)*num_locations]
+            target_level = sku.reorder_point
+            # If any location is below target, order up to target
+            if np.any(np.array(sku_stocks) < target_level):
+                order_quantities[i] = target_level - min(sku_stocks)
             else:
                 order_quantities[i] = 0
-            
         return np.concatenate([order_quantities, lead_time_reductions])
     def learn(self, *args, **kwargs):
         return 0.0
@@ -301,6 +337,155 @@ class RandomAgent:
         return 0.0
     def save(self, path):
         pass
+
+def plot_comprehensive_comparison(td_eval_metrics, dqn_eval_metrics, random_metrics, save_dir):
+    """Create a comprehensive comparison plot showing all key metrics"""
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(20, 16))
+    
+    # Colors for consistency
+    colors = ['#2E86AB', '#A23B72', '#F18F01']
+    agents = ['Q-learning', 'Double DQN', 'Random']
+    
+    # 1. Average Rewards Comparison
+    avg_rewards = [
+        np.mean(td_eval_metrics['rewards']),
+        np.mean(dqn_eval_metrics['rewards']),
+        np.mean(random_metrics['rewards'])
+    ]
+    
+    bars1 = ax1.bar(agents, avg_rewards, color=colors, alpha=0.8, edgecolor='black', linewidth=0.5)
+    ax1.set_title('Average Episode Rewards', fontsize=16, fontweight='bold')
+    ax1.set_ylabel('Average Reward', fontsize=14)
+    ax1.grid(True, alpha=0.3, axis='y')
+    
+    # Add value labels
+    for bar, value in zip(bars1, avg_rewards):
+        height = bar.get_height()
+        ax1.text(bar.get_x() + bar.get_width()/2., height + max(avg_rewards) * 0.01,
+                f'{value:.1f}', ha='center', va='bottom', fontsize=12, fontweight='bold')
+    
+    # 2. Service Levels Comparison
+    avg_service_levels = [
+        np.mean(td_eval_metrics['service_levels']),
+        np.mean(dqn_eval_metrics['service_levels']),
+        np.mean(random_metrics['service_levels'])
+    ]
+    
+    bars2 = ax2.bar(agents, avg_service_levels, color=colors, alpha=0.8, edgecolor='black', linewidth=0.5)
+    ax2.set_title('Average Service Levels', fontsize=16, fontweight='bold')
+    ax2.set_ylabel('Service Level (%)', fontsize=14)
+    ax2.set_ylim(0, 100)
+    ax2.grid(True, alpha=0.3, axis='y')
+    
+    # Add value labels
+    for bar, value in zip(bars2, avg_service_levels):
+        height = bar.get_height()
+        ax2.text(bar.get_x() + bar.get_width()/2., height + 2,
+                f'{value:.1f}%', ha='center', va='bottom', fontsize=12, fontweight='bold')
+    
+    # 3. Total Stockouts Comparison
+    total_stockouts_td = sum([np.mean(td_eval_metrics['location_stockouts'][loc]) for loc in ['Location_1', 'Location_2', 'Location_3', 'Retail']])
+    total_stockouts_dqn = sum([np.mean(dqn_eval_metrics['location_stockouts'][loc]) for loc in ['Location_1', 'Location_2', 'Location_3', 'Retail']])
+    total_stockouts_random = sum([np.mean(random_metrics['location_stockouts'][loc]) for loc in ['Location_1', 'Location_2', 'Location_3', 'Retail']])
+    
+    total_stockouts = [total_stockouts_td, total_stockouts_dqn, total_stockouts_random]
+    
+    bars3 = ax3.bar(agents, total_stockouts, color=colors, alpha=0.8, edgecolor='black', linewidth=0.5)
+    ax3.set_title('Total Average Stockouts (All Locations)', fontsize=16, fontweight='bold')
+    ax3.set_ylabel('Total Stockouts', fontsize=14)
+    ax3.grid(True, alpha=0.3, axis='y')
+    
+    # Add value labels
+    for bar, value in zip(bars3, total_stockouts):
+        height = bar.get_height()
+        ax3.text(bar.get_x() + bar.get_width()/2., height + max(total_stockouts) * 0.01,
+                f'{value:.1f}', ha='center', va='bottom', fontsize=12, fontweight='bold')
+    
+    # 4. Episode Lengths Comparison
+    avg_episode_lengths = [
+        np.mean(td_eval_metrics['episode_lengths']),
+        np.mean(dqn_eval_metrics['episode_lengths']),
+        np.mean(random_metrics['episode_lengths'])
+    ]
+    
+    bars4 = ax4.bar(agents, avg_episode_lengths, color=colors, alpha=0.8, edgecolor='black', linewidth=0.5)
+    ax4.set_title('Average Episode Lengths', fontsize=16, fontweight='bold')
+    ax4.set_ylabel('Episode Length (Steps)', fontsize=14)
+    ax4.grid(True, alpha=0.3, axis='y')
+    
+    # Add value labels
+    for bar, value in zip(bars4, avg_episode_lengths):
+        height = bar.get_height()
+        ax4.text(bar.get_x() + bar.get_width()/2., height + max(avg_episode_lengths) * 0.01,
+                f'{value:.1f}', ha='center', va='bottom', fontsize=12, fontweight='bold')
+    
+    plt.tight_layout(pad=3.0)
+    os.makedirs(save_dir, exist_ok=True)
+    plt.savefig(os.path.join(save_dir, 'comprehensive_comparison.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+
+def save_performance_summary(td_eval_metrics, dqn_eval_metrics, random_metrics, save_dir):
+    """Save a comprehensive performance summary as CSV"""
+    
+    # Calculate all metrics
+    summary_data = {
+        'Metric': [],
+        'Q-learning': [],
+        'Double DQN': [],
+        'Random': []
+    }
+    
+    # Average rewards
+    summary_data['Metric'].append('Average Reward')
+    summary_data['Q-learning'].append(np.mean(td_eval_metrics['rewards']))
+    summary_data['Double DQN'].append(np.mean(dqn_eval_metrics['rewards']))
+    summary_data['Random'].append(np.mean(random_metrics['rewards']))
+    
+    # Service levels
+    summary_data['Metric'].append('Average Service Level (%)')
+    summary_data['Q-learning'].append(np.mean(td_eval_metrics['service_levels']))
+    summary_data['Double DQN'].append(np.mean(dqn_eval_metrics['service_levels']))
+    summary_data['Random'].append(np.mean(random_metrics['service_levels']))
+    
+    # Episode lengths
+    summary_data['Metric'].append('Average Episode Length')
+    summary_data['Q-learning'].append(np.mean(td_eval_metrics['episode_lengths']))
+    summary_data['Double DQN'].append(np.mean(dqn_eval_metrics['episode_lengths']))
+    summary_data['Random'].append(np.mean(random_metrics['episode_lengths']))
+    
+    # Stockouts by location
+    for location in ['Location_1', 'Location_2', 'Location_3', 'Retail']:
+        summary_data['Metric'].append(f'Average Stockouts - {location}')
+        summary_data['Q-learning'].append(np.mean(td_eval_metrics['location_stockouts'][location]))
+        summary_data['Double DQN'].append(np.mean(dqn_eval_metrics['location_stockouts'][location]))
+        summary_data['Random'].append(np.mean(random_metrics['location_stockouts'][location]))
+    
+    # Total stockouts
+    total_stockouts_td = sum([np.mean(td_eval_metrics['location_stockouts'][loc]) for loc in ['Location_1', 'Location_2', 'Location_3', 'Retail']])
+    total_stockouts_dqn = sum([np.mean(dqn_eval_metrics['location_stockouts'][loc]) for loc in ['Location_1', 'Location_2', 'Location_3', 'Retail']])
+    total_stockouts_random = sum([np.mean(random_metrics['location_stockouts'][loc]) for loc in ['Location_1', 'Location_2', 'Location_3', 'Retail']])
+    
+    summary_data['Metric'].append('Total Average Stockouts')
+    summary_data['Q-learning'].append(total_stockouts_td)
+    summary_data['Double DQN'].append(total_stockouts_dqn)
+    summary_data['Random'].append(total_stockouts_random)
+    
+    # Reward per step
+    avg_reward_per_step_td = np.mean(td_eval_metrics['rewards']) / np.mean(td_eval_metrics['episode_lengths'])
+    avg_reward_per_step_dqn = np.mean(dqn_eval_metrics['rewards']) / np.mean(dqn_eval_metrics['episode_lengths'])
+    avg_reward_per_step_random = np.mean(random_metrics['rewards']) / np.mean(random_metrics['episode_lengths'])
+    
+    summary_data['Metric'].append('Average Reward per Step')
+    summary_data['Q-learning'].append(avg_reward_per_step_td)
+    summary_data['Double DQN'].append(avg_reward_per_step_dqn)
+    summary_data['Random'].append(avg_reward_per_step_random)
+    
+    # Create DataFrame and save
+    df = pd.DataFrame(summary_data)
+    os.makedirs(save_dir, exist_ok=True)
+    df.to_csv(os.path.join(save_dir, 'performance_summary.csv'), index=False)
+    
+    return df
 
 def main():
     # Create results directory
@@ -317,17 +502,28 @@ def main():
     # Q-learning agent
     td_agent = TDAgent(
         action_space=env.action_space,
-        discount_factor=0.99
+        discount_factor=0.995,  # More focus on long-term rewards
+        learning_rate=0.05,     # Smaller, more stable updates
+        epsilon=1.0,
+        epsilon_min=0.01,       # Allow more exploration
+        epsilon_decay=0.9999    # Slower decay for more stable learning
     )
     
     # Double DQN agent
     dqn_agent = DoubleDQNAgent(
         action_space=env.action_space,
-        discount_factor=0.99
+        discount_factor=0.98,   # Slightly less focus on long-term rewards for faster learning
+        learning_rate=0.001,    # Higher learning rate for faster updates
+        epsilon=1.0             # Initial exploration
     )
+    # Manually override DQN agent's batch size and target update frequency for faster learning
+    dqn_agent.batch_size = 32  # Reduced from 64 for more frequent updates
+    dqn_agent.epsilon_decay = 0.9995  # Faster decay for quicker exploitation
+    dqn_agent.update_target_every = 3  # Update target network more frequently
+    dqn_agent.learning_starts = 100  # Start learning earlier
     
     # Training parameters
-    num_episodes = 10000
+    num_episodes = 1000  # Reduced from 1500 for faster training
     eval_interval = 100
     
     print("Starting training for Q-learning agent...")
@@ -394,17 +590,44 @@ def main():
     plot_location_stockouts(td_eval_metrics, results_dir)
     
     # Plot histogram comparing average rewards for all three agents
-    plt.figure(figsize=(10, 6))
-    plt.hist(td_eval_metrics['rewards'], bins=20, alpha=0.7, label='Double Q-learning Agent')
-    plt.hist(dqn_eval_metrics['rewards'], bins=20, alpha=0.7, label='Double DQN Agent')
-    plt.hist(random_metrics['rewards'], bins=20, alpha=0.7, label='Random Agent')
-    plt.xlabel('Episode Reward')
-    plt.ylabel('Frequency')
-    plt.title('Reward Distribution: Q-learning vs Double DQN vs Random Agent')
-    plt.legend()
+    plt.figure(figsize=(14, 8))
+    
+    # Calculate statistics for better scaling
+    all_rewards = td_eval_metrics['rewards'] + dqn_eval_metrics['rewards'] + random_metrics['rewards']
+    min_reward = min(all_rewards)
+    max_reward = max(all_rewards)
+    
+    # Create histogram with better styling
+    bins = np.linspace(min_reward, max_reward, 30)
+    
+    plt.hist(td_eval_metrics['rewards'], bins=bins, alpha=0.7, label='Double Q-learning Agent', 
+             color='#2E86AB', edgecolor='black', linewidth=0.5)
+    plt.hist(dqn_eval_metrics['rewards'], bins=bins, alpha=0.7, label='Double DQN Agent', 
+             color='#A23B72', edgecolor='black', linewidth=0.5)
+    plt.hist(random_metrics['rewards'], bins=bins, alpha=0.7, label='Random Agent', 
+             color='#F18F01', edgecolor='black', linewidth=0.5)
+    
+    plt.xlabel('Episode Reward', fontsize=14)
+    plt.ylabel('Frequency', fontsize=14)
+    plt.title('Reward Distribution: Q-learning vs Double DQN vs Random Agent', fontsize=16, fontweight='bold')
+    plt.legend(fontsize=12)
+    plt.grid(True, alpha=0.3)
+    
+    # Add vertical lines for means
+    mean_td = np.mean(td_eval_metrics['rewards'])
+    mean_dqn = np.mean(dqn_eval_metrics['rewards'])
+    mean_random = np.mean(random_metrics['rewards'])
+    
+    plt.axvline(mean_td, color='#2E86AB', linestyle='--', linewidth=2, alpha=0.8, 
+                label=f'Q-learning Mean: {mean_td:.1f}')
+    plt.axvline(mean_dqn, color='#A23B72', linestyle='--', linewidth=2, alpha=0.8, 
+                label=f'DQN Mean: {mean_dqn:.1f}')
+    plt.axvline(mean_random, color='#F18F01', linestyle='--', linewidth=2, alpha=0.8, 
+                label=f'Random Mean: {mean_random:.1f}')
+    
     plt.tight_layout()
     os.makedirs(results_dir, exist_ok=True)
-    plt.savefig(os.path.join(results_dir, 'reward_histogram.png'))
+    plt.savefig(os.path.join(results_dir, 'reward_histogram.png'), dpi=300, bbox_inches='tight')
     plt.close()
     
     # Save evaluation metrics
@@ -472,18 +695,48 @@ def main():
     
     x = np.arange(len(labels))
     width = 0.25
-    plt.figure(figsize=(15, 6))
-    plt.bar(x - width, td_values, width, label='Q-learning')
-    plt.bar(x, dqn_values, width, label='Double DQN')
-    plt.bar(x + width, random_values, width, label='Random')
-    plt.xticks(x, labels)
-    plt.ylabel('Value')
-    plt.title('Comparison of Key Metrics: Double Q-learning vs Double DQN vs Random Agent')
-    plt.legend()
+    
+    plt.figure(figsize=(18, 10))
+    
+    # Create bars with better styling
+    bars1 = plt.bar(x - width, td_values, width, label='Q-learning', color='#2E86AB', alpha=0.8, edgecolor='black', linewidth=0.5)
+    bars2 = plt.bar(x, dqn_values, width, label='Double DQN', color='#A23B72', alpha=0.8, edgecolor='black', linewidth=0.5)
+    bars3 = plt.bar(x + width, random_values, width, label='Random', color='#F18F01', alpha=0.8, edgecolor='black', linewidth=0.5)
+    
+    # Add value labels on bars
+    def add_value_labels(bars, values):
+        for bar, value in zip(bars, values):
+            height = bar.get_height()
+            plt.text(bar.get_x() + bar.get_width()/2., height + max(values) * 0.01,
+                    f'{value:.1f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
+    
+    add_value_labels(bars1, td_values)
+    add_value_labels(bars2, dqn_values)
+    add_value_labels(bars3, random_values)
+    
+    plt.xlabel('Metrics', fontsize=14)
+    plt.ylabel('Value', fontsize=14)
+    plt.title('Comparison of Key Metrics: Double Q-learning vs Double DQN vs Random Agent', fontsize=16, fontweight='bold')
+    plt.xticks(x, labels, fontsize=12)
+    plt.legend(fontsize=12)
+    plt.grid(True, alpha=0.3, axis='y')
+    
+    # Set y-axis limits for better visibility
+    all_values = td_values + dqn_values + random_values
+    plt.ylim(0, max(all_values) * 1.15)
+    
     plt.tight_layout()
     os.makedirs(results_dir, exist_ok=True)
-    plt.savefig(os.path.join(results_dir, 'metrics_comparison_bar.png'))
+    plt.savefig(os.path.join(results_dir, 'metrics_comparison_bar.png'), dpi=300, bbox_inches='tight')
     plt.close()
+
+    # Create comprehensive comparison plot
+    plot_comprehensive_comparison(td_eval_metrics, dqn_eval_metrics, random_metrics, results_dir)
+
+    # Save performance summary
+    performance_df = save_performance_summary(td_eval_metrics, dqn_eval_metrics, random_metrics, results_dir)
+    print("\nPerformance Summary:")
+    print(performance_df.to_string(index=False))
 
     # Save trained agents
     td_agent.save(os.path.join(results_dir, 'trained_td_agent'))

@@ -63,23 +63,21 @@ class StockoutReplayBuffer:
 class DQNNetwork(nn.Module):
     def __init__(self, input_size, output_size):
         super(DQNNetwork, self).__init__()
-        self.fc1 = nn.Linear(input_size, 256)
-        self.fc2 = nn.Linear(256, 256)
-        self.fc3 = nn.Linear(256, 128)
-        self.fc4 = nn.Linear(128, output_size)
+        self.fc1 = nn.Linear(input_size, 128)  # Reduced from 256
+        self.fc2 = nn.Linear(128, 128)         # Reduced from 256
+        self.fc3 = nn.Linear(128, output_size) # Removed one layer
         # Initialize weights using Xavier/Glorot initialization
         nn.init.xavier_uniform_(self.fc1.weight)
         nn.init.xavier_uniform_(self.fc2.weight)
         nn.init.xavier_uniform_(self.fc3.weight)
-        nn.init.xavier_uniform_(self.fc4.weight)
+        
     def forward(self, x):
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
-        x = F.relu(self.fc3(x))
-        return self.fc4(x)
+        return self.fc3(x)
 
 class DoubleDQNAgent:
-    def __init__(self, action_space, learning_rate=0.0005, discount_factor=0.99, epsilon=1.0):
+    def __init__(self, action_space, learning_rate=0.001, discount_factor=0.98, epsilon=1.0):
         """
         Initialize Double DQN agent
         
@@ -90,153 +88,142 @@ class DoubleDQNAgent:
             epsilon: Initial exploration rate
         """
         self.action_space = action_space
-        self.learning_rate = 0.0005
-        self.discount_factor = 0.99
+        self.learning_rate = learning_rate
+        self.discount_factor = discount_factor
         self.epsilon = epsilon
-        self.epsilon_min = 0.05
-        self.epsilon_decay = 0.9997
+        self.epsilon_min = 0.01  # Reduced from 0.05 for more exploration
+        self.epsilon_decay = 0.9995  # Faster decay from 0.9997
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.state_size = None
         self.action_size = None
+        
+        # Optimized hyperparameters for faster training
+        self.batch_size = 32  # Reduced from 64 for more frequent updates
+        self.memory_size = 10000  # Reduced from default for faster learning
+        self.update_target_every = 3  # More frequent target updates
+        self.learning_starts = 100  # Start learning earlier
+        
+        # Initialize replay buffer with stockout-based prioritization
+        self.memory = StockoutReplayBuffer(self.memory_size)
+        
+        # Networks will be initialized when we know the state size
         self.q_network = None
         self.target_network = None
         self.optimizer = None
-        self.memory = StockoutReplayBuffer(500000)
-        self.batch_size = 128
-        self.update_target_every = 1
-        self.tau = 0.005
-        self.steps = 0
+        
+        # Tracking
         self.td_errors = []
-        self.num_order_levels = 20
-        self.order_level_values = None
+        self.update_count = 0
     
     def initialize_networks(self, state_size, num_skus):
-        """Initialize neural networks once state size and num_skus are known"""
-        self.state_size = state_size
-        self.action_size = num_skus * self.num_order_levels
-        # Create Q-networks
-        self.q_network = DQNNetwork(state_size, self.action_size).to(self.device)
-        self.target_network = DQNNetwork(state_size, self.action_size).to(self.device)
+        """Initialize Q-network and target network"""
+        # Simplified action space: discrete actions for each SKU
+        # Each SKU can have actions from 0 to max_inventory in steps
+        max_inventory = 1000  # This should match env.config['max_inventory']
+        action_size = 21  # 0, 50, 100, ..., 1000 (21 discrete levels)
+        
+        self.q_network = DQNNetwork(state_size, action_size * num_skus).to(self.device)
+        self.target_network = DQNNetwork(state_size, action_size * num_skus).to(self.device)
         self.target_network.load_state_dict(self.q_network.state_dict())
-        # Create optimizer
+        
+        # Use Adam optimizer with the specified learning rate
         self.optimizer = optim.Adam(self.q_network.parameters(), lr=self.learning_rate)
-    
-    def get_demand_stats(self, env):
-        """Return a vector of 90th percentile lead time demand for each SKU."""
-        demand_stats = []
-        for sku_id, sku in env.skus.items():
-            quantile = 0.9
-            shape = sku.alpha * sku.lead_time_days
-            scale = sku.beta
-            demand90 = gamma.ppf(quantile, a=shape, scale=scale)
-            demand_stats.append(demand90)
-        return np.array(demand_stats)
-
-    def discretize_state(self, state, env=None):
-        """Convert continuous state values to discrete for neural network input, including demand stats if env is provided."""
-        max_inventory = 1000
-        state_arr = np.array(state)
-        if env is not None:
-            demand_stats = self.get_demand_stats(env)
-            state_arr = np.concatenate([state_arr, demand_stats])
-        normalized_state = state_arr / max_inventory
-        return normalized_state.astype(np.float32)
+        
+        self.state_size = state_size
+        self.action_size = action_size * num_skus
     
     def get_action(self, state, env, greedy=False):
-        if env is None:
-            raise ValueError('env must not be None when calling get_action')
-        num_skus = len(env.skus)
-        if self.order_level_values is None:
-            self.order_level_values = np.linspace(0, env.action_space.high[0], self.num_order_levels, dtype=np.int32)
-        if self.q_network is None or self.target_network is None:
-            state_size = len(self.discretize_state(state, env))
-            self.initialize_networks(state_size, num_skus)
-        if not greedy and np.random.random() < self.epsilon:
-            random_order_levels = np.random.randint(0, self.num_order_levels, num_skus)
-            order_quantities = self.order_level_values[random_order_levels]
-            return order_quantities
-        discrete_state = self.discretize_state(state, env)
-        state_tensor = torch.FloatTensor(discrete_state).unsqueeze(0).to(self.device)
+        """Get action using epsilon-greedy policy"""
         if self.q_network is None:
-            raise ValueError('Q-network is not initialized.')
+            # Initialize networks if not done yet
+            state_size = len(state)
+            num_skus = len(env.skus)
+            self.initialize_networks(state_size, num_skus)
+        
+        # Convert state to tensor
+        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+        
+        # Get Q values
         with torch.no_grad():
             q_values = self.q_network(state_tensor)
-            q_values = q_values.cpu().numpy()[0]
-        best_orders = np.zeros(num_skus)
-        for i in range(num_skus):
-            order_q_start_idx = i * self.num_order_levels
-            order_q_end_idx = order_q_start_idx + self.num_order_levels
-            sku_order_q_values = q_values[order_q_start_idx:order_q_end_idx]
-            best_order_level_idx = np.argmax(sku_order_q_values)
-            best_orders[i] = self.order_level_values[best_order_level_idx]
-        return best_orders
+        
+        if greedy or np.random.random() > self.epsilon:
+            # Exploit: choose best action
+            action_indices = q_values.argmax(1).cpu().numpy()
+        else:
+            # Explore: choose random action
+            action_indices = np.random.randint(0, q_values.shape[1], size=q_values.shape[0])
+        
+        # Convert action indices to actual order quantities
+        actions = []
+        for i, action_idx in enumerate(action_indices):
+            # Map action index to order quantity (0 to max_inventory)
+            order_qty = int(action_idx * env.action_space.high[0] / (q_values.shape[1] - 1))
+            actions.append(order_qty)
+        
+        return np.array(actions, dtype=np.int32)
     
     def learn(self, state, action, reward, next_state, env=None, episode_stockouts=0):
-        if env is None:
-            raise ValueError('env must not be None when calling learn')
-        discrete_state = self.discretize_state(state, env)
-        discrete_next_state = self.discretize_state(next_state, env)
-        num_skus = len(action)
-        if self.order_level_values is None:
-            self.order_level_values = np.linspace(0, env.action_space.high[0], self.num_order_levels, dtype=np.int32)
-        if self.q_network is None or self.target_network is None:
-            state_size = len(discrete_state)
-            self.initialize_networks(state_size, num_skus)
-        action_indices = []
-        for i in range(num_skus):
-            order_level_idx = np.argmin(np.abs(self.order_level_values - action[i]))
-            action_indices.append(order_level_idx)
-        self.memory.push(discrete_state, action_indices, reward, discrete_next_state, False, episode_stockouts=episode_stockouts)
-        if len(self.memory) < self.batch_size:
-            return 0.0
-        samples = self.memory.sample(self.batch_size)
-        if not samples:
-            return 0.0
-        batch = Experience(*zip(*samples))
-        state_batch = torch.FloatTensor(np.array(batch.state)).to(self.device)
-        action_batch = torch.LongTensor(np.array(batch.action)).to(self.device)
-        reward_batch = torch.FloatTensor(batch.reward).to(self.device)
-        reward_batch = torch.clamp(reward_batch, -1000, 1000)
-        next_state_batch = torch.FloatTensor(np.array(batch.next_state)).to(self.device)
-        done_batch = torch.BoolTensor(batch.done).to(self.device)
-        if self.q_network is None or self.target_network is None:
-            raise ValueError('Q-network and target network must be initialized.')
-        self.q_network.train()
-        self.target_network.eval()
-        current_q_values = self.q_network(state_batch)
-        with torch.no_grad():
-            next_q_values = self.q_network(next_state_batch)
-            next_q_values_target = self.target_network(next_state_batch)
-        n_action_components = action_batch.shape[1]
-        loss = torch.tensor(0.0, device=self.device)
-        for i in range(n_action_components):
-            current_q = current_q_values[:, i]
-            action_idx = action_batch[:, i]
-            current_q_selected = current_q.gather(0, action_idx.unsqueeze(0)).squeeze(0) if current_q.dim() > 1 else current_q[action_idx]
-            next_actions = next_q_values[:, i].argmax(dim=0)
-            next_q_selected = next_q_values_target[:, i][next_actions]
-            target_q = reward_batch + (self.discount_factor * next_q_selected * (~done_batch).float())
-            component_loss = F.smooth_l1_loss(current_q_selected, target_q)
-            loss = loss + component_loss
-        loss = loss / n_action_components
+        """Learn from experience using Double DQN"""
+        # Store experience in replay buffer
+        self.memory.push(state, action, reward, next_state, False, episode_stockouts)
         
-        if self.optimizer is None:
-            raise ValueError("Optimizer is not initialized.")
+        # Only learn if we have enough samples and have started learning
+        if len(self.memory) < self.learning_starts or len(self.memory) < self.batch_size:
+            return 0.0
+        
+        # Sample batch from replay buffer
+        batch = self.memory.sample(self.batch_size)
+        if not batch:
+            return 0.0
+        
+        # Prepare batch data
+        states = torch.FloatTensor([exp.state for exp in batch]).to(self.device)
+        actions = torch.LongTensor([exp.action for exp in batch]).to(self.device)
+        rewards = torch.FloatTensor([exp.reward for exp in batch]).to(self.device)
+        next_states = torch.FloatTensor([exp.next_state for exp in batch]).to(self.device)
+        dones = torch.BoolTensor([exp.done for exp in batch]).to(self.device)
+        
+        # Get current Q values
+        current_q_values = self.q_network(states).gather(1, actions.unsqueeze(1))
+        
+        # Double DQN: Use main network to select actions, target network to evaluate
+        with torch.no_grad():
+            next_actions = self.q_network(next_states).argmax(1)
+            next_q_values = self.target_network(next_states).gather(1, next_actions.unsqueeze(1))
+            target_q_values = rewards.unsqueeze(1) + (self.discount_factor * next_q_values * ~dones.unsqueeze(1))
+        
+        # Compute loss and update
+        loss = F.mse_loss(current_q_values, target_q_values)
         self.optimizer.zero_grad()
         loss.backward()
+        
+        # Gradient clipping for stability
         torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
+        
         self.optimizer.step()
-        self.steps += 1
-        if self.steps % self.update_target_every == 0:
+        
+        # Update target network more frequently
+        self.update_count += 1
+        if self.update_count % self.update_target_every == 0:
             self.soft_update()
-        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
-        return loss.item()
+        
+        # Track TD error for monitoring
+        td_error = loss.item()
+        self.td_errors.append(td_error)
+        
+        # Decay epsilon
+        if self.epsilon > self.epsilon_min:
+            self.epsilon *= self.epsilon_decay
+        
+        return td_error
     
     def soft_update(self):
         """Soft update target network using Polyak averaging"""
         if self.q_network is not None and self.target_network is not None:
+            tau = 0.005  # Small update rate for stability
             for target_param, param in zip(self.target_network.parameters(), self.q_network.parameters()):
-                target_param.data.copy_(self.tau * param.data + (1.0 - self.tau) * target_param.data)
+                target_param.data.copy_(tau * param.data + (1.0 - tau) * target_param.data)
     
     def get_average_td_error(self, window=100):
         """Get average TD error over last n steps"""
