@@ -214,19 +214,13 @@ class InventoryEnvironment(gym.Env):
             dtype=np.int32
         )
         
-        # Initialize observation space. Information visible to the agent in order to take decisions.
-        self.observation_space = spaces.Dict({
-            'Location_1_stock': spaces.Box(low=0, high=self.config['max_inventory'], shape=(num_skus,), dtype=np.int32),
-            'Location_2_stock': spaces.Box(low=0, high=self.config['max_inventory'], shape=(num_skus,), dtype=np.int32),
-            'Location_3_stock': spaces.Box(low=0, high=self.config['max_inventory'], shape=(num_skus,), dtype=np.int32),
-            'retail_stock': spaces.Box(low=0, high=self.config['max_inventory'], shape=(num_skus,), dtype=np.int32),
-            'open_pos': spaces.Box(low=0, high=self.config['max_inventory'], shape=(num_skus,), dtype=np.int32),
-            'demand': spaces.Box(low=0, high=np.inf, shape=(num_skus,), dtype=np.float32),
-            'lead_time': spaces.Box(low=0, high=np.inf, shape=(num_skus,), dtype=np.float32),
-            'supplier_load': spaces.Box(low=0, high=1, shape=(num_skus,), dtype=np.float32),
-            'supplier_reliability': spaces.Box(low=0, high=1, shape=(num_skus,), dtype=np.float32),
-            'time_delta': spaces.Box(low=0, high=np.inf, shape=(num_skus,), dtype=np.float32)
-        })
+        # Simplified observation space: only current inventory levels across locations
+        self.observation_space = spaces.Box(
+            low=0, 
+            high=self.config['max_inventory'], 
+            shape=(num_skus * 4,),  # 4 locations: Location_1, Location_2, Location_3, retail
+            dtype=np.int32
+        )
         
         self.reset()
 
@@ -335,13 +329,85 @@ class InventoryEnvironment(gym.Env):
             return int(np.ceil(demand_during_lead_time + max(1, sku.safety_stock // 2)))
 
     def _get_state(self):
-        """Return the current state (inventory levels for all SKUs, warehouse and retail)"""
+        """Return the current state with all rich features for better decision making"""
         state = []
+        current_time = self.config['current_time']
+        
         for sku_id in sorted(self.skus.keys()): # Ensure consistent order
             sku = self.skus[sku_id]
-            state.append(sku.current_stock) # Warehouse stock
+            
+            # Basic inventory levels
+            state.append(sku.current_stock)  # Warehouse stock
             state.append(sku.retail_stock)   # Retail stock
-        return np.array(state, dtype=np.int32)
+            
+            # Open purchase orders
+            state.append(sku.open_pos_supplier_to_warehouse)  # Supplier to warehouse POs
+            state.append(sku.open_pos_warehouse_to_retail)    # Warehouse to retail POs
+            
+            # Demand information
+            period_demand = self.calculate_demand_for_period(
+                sku, sku.last_decision_time, current_time
+            ) if current_time > sku.last_decision_time else 0.0
+            state.append(period_demand)  # Current period demand
+            
+            # Lead time information
+            state.append(sku.lead_time_days)  # Current lead time
+            state.append(self._get_days_to_delivery(sku_id))  # Days until next delivery
+            
+            # Supplier information
+            supplier_info = self.suppliers[sku.supplier]
+            state.append(supplier_info['current_load'])  # Supplier load
+            state.append(supplier_info['reliability'])   # Supplier reliability
+            
+            # Time information
+            time_delta = max(self.config['min_decision_interval'], 
+                           current_time - sku.last_decision_time)
+            state.append(time_delta)  # Time since last decision
+            
+            # Service level metrics
+            service_level = (sku.fulfilled_demand / sku.total_demand 
+                           if sku.total_demand > 0 else 1.0)
+            state.append(service_level)  # Current service level
+            
+            # Inventory thresholds
+            state.append(sku.safety_stock)  # Safety stock level
+            state.append(sku.reorder_point)  # Reorder point
+            state.append(sku.max_stock)      # Maximum stock level
+            
+            # ABC classification (encoded as numeric)
+            abc_value = 3.0 if sku.abc_class == 'A' else (2.0 if sku.abc_class == 'B' else 1.0)
+            state.append(abc_value)  # ABC classification value
+            
+            # Demand history statistics
+            if len(sku.demand_history) > 0:
+                avg_demand = np.mean(sku.demand_history)
+                demand_std = np.std(sku.demand_history) if len(sku.demand_history) > 1 else 0.0
+            else:
+                avg_demand = sku.base_demand
+                demand_std = 0.0
+            state.append(avg_demand)  # Average historical demand
+            state.append(demand_std)   # Demand standard deviation
+            
+            # Stockout and replenishment metrics
+            state.append(sku.stockout_occasions)  # Number of stockouts
+            state.append(sku.replenishment_cycles)  # Number of replenishment cycles
+            
+        return np.array(state, dtype=np.float32)
+    
+    def _get_observation(self):
+        """Return simplified observation with only inventory levels across locations"""
+        observation = []
+        for sku_id in sorted(self.skus.keys()):
+            sku = self.skus[sku_id]
+            # Get stock levels for each location
+            location_1_stock = sku.current_stock if sku.inventory_location == 'Location_1' else 0
+            location_2_stock = sku.current_stock if sku.inventory_location == 'Location_2' else 0
+            location_3_stock = sku.current_stock if sku.inventory_location == 'Location_3' else 0
+            retail_stock = sku.retail_stock
+            
+            observation.extend([location_1_stock, location_2_stock, location_3_stock, retail_stock])
+        
+        return np.array(observation, dtype=np.int32)
 
     def _replenish_retail(self, sku_id: str, demand: int):
         """Replenish retail stock from the primary warehouse location only, respecting warehouse safety stock."""
@@ -497,7 +563,7 @@ class InventoryEnvironment(gym.Env):
         if not np.isfinite(total_reward):
             total_reward = 0.0
         total_reward = np.clip(total_reward, -1000, 2000)
-        return self._get_state(), total_reward, done, info
+        return self._get_observation(), total_reward, done, info
     #High safety stock for Type C is strongly indicated in the results where C experiences nearly zero stockouts.
     def calculate_dynamic_safety_stock(self, sku, z=None):
         """Calculate safety stock accurately based on demand variability and lead time, using fixed gamma params."""
@@ -546,7 +612,7 @@ class InventoryEnvironment(gym.Env):
         # Reset supplier loads
         for supplier in self.suppliers.values():
             supplier['current_load'] = 0
-        return self._get_state()
+        return self._get_observation()
     # Update the lead times and the delivery dates 
     def _is_delivery_due(self, sku: SKUData, current_time: float) -> bool:
         """Check if delivery is due for a SKU based on simulation time"""

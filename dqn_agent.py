@@ -23,9 +23,10 @@ class StockoutReplayBuffer:
     def push(self, *args, episode_stockouts=0):
         # args should be (state, action, reward, next_state, done)
         if len(args) == 5:
-            exp = Experience(args[0], args[1], args[2], args[3], args[4], episode_stockouts)
+            # Accept action as array/list for multi-SKU
+            exp = Experience(args[0], np.array(args[1]), args[2], args[3], args[4], episode_stockouts)
         else:
-            raise ValueError("Expected 5 arguments for Experience (state, action, reward, next_state, done)")
+            raise ValueError(f"Expected 5 arguments for Experience (state, action, reward, next_state, done), got {len(args)}: {args}")
         if len(self.buffer) < self.capacity:
             self.buffer.append(exp)
             self.episode_stockouts.append(episode_stockouts)
@@ -63,18 +64,22 @@ class StockoutReplayBuffer:
 class DQNNetwork(nn.Module):
     def __init__(self, input_size, output_size):
         super(DQNNetwork, self).__init__()
-        self.fc1 = nn.Linear(input_size, 128)  # Reduced from 256
-        self.fc2 = nn.Linear(128, 128)         # Reduced from 256
-        self.fc3 = nn.Linear(128, output_size) # Removed one layer
+        # Larger network to handle rich state space
+        self.fc1 = nn.Linear(input_size, 256)  # Increased for rich state
+        self.fc2 = nn.Linear(256, 256)         # Increased for rich state
+        self.fc3 = nn.Linear(256, 128)         # Additional layer
+        self.fc4 = nn.Linear(128, output_size) # Output layer
         # Initialize weights using Xavier/Glorot initialization
         nn.init.xavier_uniform_(self.fc1.weight)
         nn.init.xavier_uniform_(self.fc2.weight)
         nn.init.xavier_uniform_(self.fc3.weight)
+        nn.init.xavier_uniform_(self.fc4.weight)
         
     def forward(self, x):
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
-        return self.fc3(x)
+        x = F.relu(self.fc3(x))
+        return self.fc4(x)
 
 class DoubleDQNAgent:
     def __init__(self, action_space, learning_rate=0.001, discount_factor=0.98, epsilon=1.0):
@@ -122,6 +127,7 @@ class DoubleDQNAgent:
         max_inventory = 1000  # This should match env.config['max_inventory']
         action_size = 21  # 0, 50, 100, ..., 1000 (21 discrete levels)
         
+        # Increase network capacity for larger state space
         self.q_network = DQNNetwork(state_size, action_size * num_skus).to(self.device)
         self.target_network = DQNNetwork(state_size, action_size * num_skus).to(self.device)
         self.target_network.load_state_dict(self.q_network.state_dict())
@@ -133,7 +139,7 @@ class DoubleDQNAgent:
         self.action_size = action_size * num_skus
     
     def get_action(self, state, env, greedy=False):
-        """Get action using epsilon-greedy policy"""
+        """Get action using epsilon-greedy policy, selecting per SKU"""
         if self.q_network is None:
             # Initialize networks if not done yet
             state_size = len(state)
@@ -145,77 +151,84 @@ class DoubleDQNAgent:
         
         # Get Q values
         with torch.no_grad():
-            q_values = self.q_network(state_tensor)
+            q_values = self.q_network(state_tensor).cpu().numpy().flatten()
         
-        if greedy or np.random.random() > self.epsilon:
-            # Exploit: choose best action
-            action_indices = q_values.argmax(1).cpu().numpy()
-        else:
-            # Explore: choose random action
-            action_indices = np.random.randint(0, q_values.shape[1], size=q_values.shape[0])
+        num_skus = len(env.skus)
+        action_size = 21  # Should match agent's action_size
+        q_values = q_values.reshape(num_skus, action_size)
         
-        # Convert action indices to actual order quantities
         actions = []
-        for i, action_idx in enumerate(action_indices):
+        for sku_idx in range(num_skus):
+            if greedy or np.random.random() > self.epsilon:
+                action_idx = np.argmax(q_values[sku_idx])
+            else:
+                action_idx = np.random.randint(0, action_size)
             # Map action index to order quantity (0 to max_inventory)
-            order_qty = int(action_idx * env.action_space.high[0] / (q_values.shape[1] - 1))
+            order_qty = int(action_idx * env.action_space.high[0] / (action_size - 1))
             actions.append(order_qty)
-        
         return np.array(actions, dtype=np.int32)
     
     def learn(self, state, action, reward, next_state, env=None, episode_stockouts=0):
-        """Learn from experience using Double DQN"""
-        # Store experience in replay buffer
-        self.memory.push(state, action, reward, next_state, False, episode_stockouts)
-        
-        # Only learn if we have enough samples and have started learning
+        """Learn from experience using Double DQN (multi-SKU aware, robust to dimension mismatches)"""
+        self.memory.push(state, action, reward, next_state, False, episode_stockouts=episode_stockouts)
+
         if len(self.memory) < self.learning_starts or len(self.memory) < self.batch_size:
             return 0.0
-        
-        # Sample batch from replay buffer
+
         batch = self.memory.sample(self.batch_size)
         if not batch:
             return 0.0
-        
+
         # Prepare batch data
         states = torch.FloatTensor([exp.state for exp in batch]).to(self.device)
-        actions = torch.LongTensor([exp.action for exp in batch]).to(self.device)
+        actions = torch.LongTensor([exp.action for exp in batch]).to(self.device)  # (batch, num_skus)
         rewards = torch.FloatTensor([exp.reward for exp in batch]).to(self.device)
         next_states = torch.FloatTensor([exp.next_state for exp in batch]).to(self.device)
         dones = torch.BoolTensor([exp.done for exp in batch]).to(self.device)
-        
+
+        batch_size = states.shape[0]
+        num_skus = actions.shape[1]
+        action_size = self.action_size // num_skus
+
         # Get current Q values
-        current_q_values = self.q_network(states).gather(1, actions.unsqueeze(1))
-        
+        q_values = self.q_network(states).view(batch_size, num_skus, action_size)  # (batch, num_skus, action_size)
+        # Clamp actions to valid range
+        actions = actions.clamp(0, action_size - 1)
+        # Gather Q-values for each SKU's chosen action
+        batch_indices = torch.arange(batch_size, device=self.device).unsqueeze(1).expand(-1, num_skus)
+        sku_indices = torch.arange(num_skus, device=self.device).unsqueeze(0).expand(batch_size, -1)
+        current_q_values = q_values[batch_indices, sku_indices, actions]  # (batch, num_skus)
+
         # Double DQN: Use main network to select actions, target network to evaluate
         with torch.no_grad():
-            next_actions = self.q_network(next_states).argmax(1)
-            next_q_values = self.target_network(next_states).gather(1, next_actions.unsqueeze(1))
-            target_q_values = rewards.unsqueeze(1) + (self.discount_factor * next_q_values * ~dones.unsqueeze(1))
-        
+            next_q_values_main = self.q_network(next_states).view(batch_size, num_skus, action_size)
+            next_actions = next_q_values_main.argmax(dim=2)  # (batch, num_skus)
+            next_q_values_target = self.target_network(next_states).view(batch_size, num_skus, action_size)
+            next_q = next_q_values_target[batch_indices, sku_indices, next_actions]  # (batch, num_skus)
+            # Expand rewards and dones to (batch, num_skus) if needed
+            if rewards.dim() == 1:
+                rewards = rewards.unsqueeze(1).expand(-1, num_skus)
+            if dones.dim() == 1:
+                dones = dones.unsqueeze(1).expand(-1, num_skus)
+            target_q_values = rewards + (self.discount_factor * next_q * (~dones))
+
         # Compute loss and update
         loss = F.mse_loss(current_q_values, target_q_values)
         self.optimizer.zero_grad()
         loss.backward()
-        
-        # Gradient clipping for stability
         torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
-        
         self.optimizer.step()
-        
-        # Update target network more frequently
+
         self.update_count += 1
         if self.update_count % self.update_target_every == 0:
             self.soft_update()
-        
-        # Track TD error for monitoring
+
         td_error = loss.item()
         self.td_errors.append(td_error)
-        
-        # Decay epsilon
+
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
-        
+
         return td_error
     
     def soft_update(self):
