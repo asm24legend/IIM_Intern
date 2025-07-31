@@ -650,6 +650,7 @@ def save_performance_summary(td_eval_metrics, dqn_eval_metrics, random_metrics, 
 def generate_comprehensive_report(metrics_history, rewards_history, td_errors, save_dir):
     """Generate a comprehensive performance report for the enhanced multi-SKU DQN system"""
     import pandas as pd
+    import numpy as np
     from datetime import datetime
     
     # Create results directory
@@ -690,7 +691,7 @@ def generate_comprehensive_report(metrics_history, rewards_history, td_errors, s
         },
         'per_sku_performance': {},
         'learning_analysis': {
-            'td_error_trend': 'decreasing' if td_errors[-10:].mean() < td_errors[:10].mean() else 'increasing',
+            'td_error_trend': 'decreasing' if np.mean(td_errors[-10:]) < np.mean(td_errors[:10]) else 'increasing',
             'convergence_indicator': 'converged' if np.std(td_errors[-20:]) < np.std(td_errors[:20]) * 0.5 else 'not_converged',
         }
     }
