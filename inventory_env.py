@@ -46,6 +46,15 @@ class SKUData:
     open_pos_supplier_to_warehouse: int = 0  # Open POs from supplier to warehouse
     open_pos_warehouse_to_retail: int = 0    # Open POs from warehouse to retail
     retail_reorder_point: int = 0            # ROP for retail
+    
+    # Enhanced features for increased state space utilization
+    demand_volatility: float = 0.0           # Volatility measure of recent demand
+    seasonal_factor: float = 1.0             # Current seasonal multiplier
+    trend_factor: float = 1.0                # Current trend multiplier
+    forecast_accuracy: float = 1.0           # Rolling accuracy of demand forecasts
+    days_since_stockout: int = 0             # Days since last stockout
+    consecutive_stockouts: int = 0           # Number of consecutive stockout periods
+    demand_forecast: float = 0.0             # Next period demand forecast
 
 @dataclass
 class InventoryLocation:
@@ -242,6 +251,52 @@ class InventoryEnvironment(gym.Env):
             demand = np.random.gamma(shape=sku.alpha * days, scale=sku.beta)
         return max(0, demand)
 
+    def update_enhanced_features(self, sku_id: str, actual_demand: float):
+        """Update enhanced features for better state space utilization"""
+        sku = self.skus[sku_id]
+        current_time = self.config['current_time']
+        
+        # Update demand volatility (rolling standard deviation)
+        if len(sku.demand_history) >= 3:
+            sku.demand_volatility = np.std(sku.demand_history[-10:]) / max(np.mean(sku.demand_history[-10:]), 1)
+        
+        # Update seasonal factor (sinusoidal pattern)
+        # Different SKUs have different seasonal patterns
+        if sku_id == 'Type_A':
+            sku.seasonal_factor = 1 + 0.3 * np.sin(2 * np.pi * current_time / 365)  # Annual cycle
+        elif sku_id == 'Type_B':
+            sku.seasonal_factor = 1 + 0.2 * np.sin(2 * np.pi * current_time / 90)   # Quarterly cycle
+        else:  # Type_C
+            sku.seasonal_factor = 1 + 0.1 * np.sin(2 * np.pi * current_time / 30)   # Monthly cycle
+        
+        # Update trend factor (gradual growth/decline)
+        trend_rate = 0.001 if sku_id == 'Type_A' else (-0.0005 if sku_id == 'Type_B' else 0.0002)
+        sku.trend_factor = 1 + trend_rate * current_time
+        
+        # Update forecast accuracy (comparing previous forecast to actual)
+        if sku.demand_forecast > 0:
+            forecast_error = abs(sku.demand_forecast - actual_demand) / max(actual_demand, 1)
+            # Exponential moving average of forecast accuracy
+            sku.forecast_accuracy = 0.9 * sku.forecast_accuracy + 0.1 * (1 - min(forecast_error, 1))
+        
+        # Update days since stockout
+        if sku.retail_stock <= 0:
+            sku.days_since_stockout = 0
+            sku.consecutive_stockouts += 1
+        else:
+            sku.days_since_stockout += 1
+            sku.consecutive_stockouts = 0
+        
+        # Generate demand forecast for next period
+        base_forecast = sku.base_demand * sku.seasonal_factor * sku.trend_factor
+        if len(sku.demand_history) >= 3:
+            # Use exponential smoothing for forecast
+            alpha = 0.3
+            recent_avg = np.mean(sku.demand_history[-3:])
+            sku.demand_forecast = alpha * recent_avg + (1 - alpha) * base_forecast
+        else:
+            sku.demand_forecast = base_forecast
+
     def calculate_lead_time_demand(self, sku_id: str) -> float:
         """Calculate demand during lead time"""
         sku = self.skus[sku_id]
@@ -392,6 +447,15 @@ class InventoryEnvironment(gym.Env):
             state.append(sku.stockout_occasions)  # Number of stockouts
             state.append(sku.replenishment_cycles)  # Number of replenishment cycles
             
+            # Enhanced features for better state space utilization
+            state.append(sku.demand_volatility)     # Recent demand volatility
+            state.append(sku.seasonal_factor)      # Seasonal adjustment factor
+            state.append(sku.trend_factor)         # Trend adjustment factor
+            state.append(sku.forecast_accuracy)    # Forecast accuracy metric
+            state.append(sku.days_since_stockout)  # Days since last stockout
+            state.append(sku.consecutive_stockouts) # Consecutive stockout periods
+            state.append(sku.demand_forecast)      # Forecasted demand
+            
         return np.array(state, dtype=np.float32)
     
     def _get_observation(self):
@@ -480,6 +544,9 @@ class InventoryEnvironment(gym.Env):
             if len(sku.demand_history) > sku.demand_window:
                 sku.demand_history = sku.demand_history[-sku.demand_window:]
             sku.total_demand += period_demand
+            
+            # Update enhanced features for better state utilization
+            self.update_enhanced_features(sku_id, period_demand)
             fulfilled_current_demand = min(period_demand, sku.retail_stock)
             sku.retail_stock -= int(fulfilled_current_demand)
             stockout = int(period_demand - fulfilled_current_demand)

@@ -49,16 +49,87 @@ class TDAgent:
 
     def discretize_state(self, state, env=None):
         """
-        Convert continuous state values to discrete for Q-table lookup.
-        State is now an array of inventory levels plus demand stats if env is provided.
+        Enhanced state discretization that better utilizes the rich state information.
+        Each feature type is normalized differently for better state space utilization.
         """
-        max_inventory = 1000
         state_arr = np.array(state)
+        discretized_features = []
+        
         if env is not None:
+            feature_idx = 0
+            for sku_id in sorted(env.skus.keys()):
+                sku = env.skus[sku_id]
+                
+                # Basic inventory levels (normalized by max_stock)
+                current_stock = state_arr[feature_idx] / max(sku.max_stock, 1)
+                retail_stock = state_arr[feature_idx + 1] / max(sku.max_stock, 1)
+                discretized_features.extend([round(current_stock, 2), round(retail_stock, 2)])
+                
+                # Open purchase orders (normalized by max_stock)
+                open_pos_warehouse = state_arr[feature_idx + 2] / max(sku.max_stock, 1)
+                open_pos_retail = state_arr[feature_idx + 3] / max(sku.max_stock, 1)
+                discretized_features.extend([round(open_pos_warehouse, 2), round(open_pos_retail, 2)])
+                
+                # Period demand (normalized by base_demand * 2 for range)
+                period_demand = state_arr[feature_idx + 4] / max(sku.base_demand * 2, 1)
+                discretized_features.append(round(period_demand, 2))
+                
+                # Lead time (discrete values)
+                lead_time = int(state_arr[feature_idx + 5])
+                days_to_delivery = round(state_arr[feature_idx + 6], 1)
+                discretized_features.extend([lead_time, days_to_delivery])
+                
+                # Supplier metrics (already in [0,1] range)
+                supplier_load = round(state_arr[feature_idx + 7], 2)
+                supplier_reliability = round(state_arr[feature_idx + 8], 2)
+                discretized_features.extend([supplier_load, supplier_reliability])
+                
+                # Time delta (normalized by typical decision interval)
+                time_delta = round(state_arr[feature_idx + 9] / 10.0, 2)
+                discretized_features.append(time_delta)
+                
+                # Service level (already in [0,1] range)
+                service_level = round(state_arr[feature_idx + 10], 2)
+                discretized_features.append(service_level)
+                
+                # Inventory thresholds (normalized by max_stock)
+                safety_stock = state_arr[feature_idx + 11] / max(sku.max_stock, 1)
+                reorder_point = state_arr[feature_idx + 12] / max(sku.max_stock, 1)
+                max_stock_norm = state_arr[feature_idx + 13] / 1000  # Fixed normalization
+                discretized_features.extend([round(safety_stock, 2), round(reorder_point, 2), round(max_stock_norm, 2)])
+                
+                # ABC classification (discrete)
+                abc_value = int(state_arr[feature_idx + 14])
+                discretized_features.append(abc_value)
+                
+                # Demand statistics (normalized by base_demand * 3)
+                avg_demand = state_arr[feature_idx + 15] / max(sku.base_demand * 3, 1)
+                demand_std = state_arr[feature_idx + 16] / max(sku.base_demand * 2, 1)
+                discretized_features.extend([round(avg_demand, 2), round(demand_std, 2)])
+                
+                # Enhanced features (7 additional features)
+                demand_volatility = round(state_arr[feature_idx + 17], 2)
+                seasonal_factor = round(state_arr[feature_idx + 18], 2)
+                trend_factor = round(state_arr[feature_idx + 19], 2)
+                forecast_accuracy = round(state_arr[feature_idx + 20], 2)
+                days_since_stockout = min(int(state_arr[feature_idx + 21]), 30)  # Cap at 30 days
+                consecutive_stockouts = min(int(state_arr[feature_idx + 22]), 10)  # Cap at 10
+                demand_forecast = state_arr[feature_idx + 23] / max(sku.base_demand * 2, 1)
+                discretized_features.extend([demand_volatility, seasonal_factor, trend_factor, 
+                                           forecast_accuracy, days_since_stockout, 
+                                           consecutive_stockouts, round(demand_forecast, 2)])
+                
+                feature_idx += 24
+            
+            # Add gamma demand statistics for better forecasting
             demand_stats = self.get_demand_stats(env)
-            state_arr = np.concatenate([state_arr, demand_stats])
-        normalized_state = tuple((state_arr / max_inventory).round(3))
-        return normalized_state
+            for stat in demand_stats:
+                discretized_features.append(round(stat / 100, 2))  # Normalize demand stats
+        else:
+            # Fallback for when env is not provided
+            discretized_features = (state_arr / 1000).round(3).tolist()
+        
+        return tuple(discretized_features)
     
     def get_action(self, state, env, greedy=False):
         """

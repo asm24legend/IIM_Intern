@@ -307,13 +307,67 @@ def train(env, agent, num_episodes=100, max_steps=5000):
             episode_metrics['avg_order_quantity'] = total_orders / len(episode_metrics['sku_orders'])
         
         # Calculate state space utilization (how much of the rich state is being used)
+        # Improved calculation that counts actual meaningful feature values
         state_features_used = 0
         total_features = len(state)
+        feature_idx = 0
+        
         for sku_id in env.skus:
             sku = env.skus[sku_id]
-            # Count non-zero features for this SKU
-            if sku.current_stock > 0 or sku.retail_stock > 0 or sku.open_pos_supplier_to_warehouse > 0:
-                state_features_used += 1
+            
+            # Count features that have meaningful/non-default values
+            # Features per SKU: 24 total features (enhanced state in inventory_env.py)
+            
+            # Basic inventory levels (2 features)
+            if sku.current_stock > 0: state_features_used += 1
+            if sku.retail_stock > 0: state_features_used += 1
+            
+            # Open purchase orders (2 features)
+            if sku.open_pos_supplier_to_warehouse > 0: state_features_used += 1
+            if sku.open_pos_warehouse_to_retail > 0: state_features_used += 1
+            
+            # Demand information (1 feature) - always meaningful if > 0
+            period_demand = state[feature_idx + 4] if feature_idx + 4 < len(state) else 0
+            if period_demand > 0: state_features_used += 1
+            
+            # Lead time information (2 features) - always meaningful
+            state_features_used += 2  # lead_time_days and days_to_delivery always used
+            
+            # Supplier information (2 features) - always meaningful
+            state_features_used += 2  # supplier load and reliability always used
+            
+            # Time information (1 feature) - always meaningful
+            state_features_used += 1  # time_delta always used
+            
+            # Service level metrics (1 feature) - meaningful if demand exists
+            if sku.total_demand > 0: state_features_used += 1
+            
+            # Inventory thresholds (3 features) - always meaningful
+            state_features_used += 3  # safety_stock, reorder_point, max_stock always used
+            
+            # ABC classification (1 feature) - always meaningful
+            state_features_used += 1  # ABC class always used
+            
+            # Demand history statistics (2 features) - meaningful if history exists
+            if len(sku.demand_history) > 0: 
+                state_features_used += 2  # avg_demand and demand_std
+            else:
+                state_features_used += 1  # base_demand used as fallback
+            
+            # Stockout and replenishment metrics (2 features) - always meaningful
+            state_features_used += 2  # stockout_occasions and replenishment_cycles always tracked
+            
+            # Enhanced features (7 features) - mostly always meaningful
+            state_features_used += 1  # demand_volatility (if history exists)
+            state_features_used += 1  # seasonal_factor (always meaningful)
+            state_features_used += 1  # trend_factor (always meaningful)
+            state_features_used += 1  # forecast_accuracy (always meaningful)
+            state_features_used += 1  # days_since_stockout (always meaningful)
+            state_features_used += 1  # consecutive_stockouts (always meaningful)
+            state_features_used += 1  # demand_forecast (always meaningful)
+            
+            feature_idx += 24  # Move to next SKU's features (now 24 features per SKU)
+        
         episode_metrics['state_utilization'] = (state_features_used / total_features) * 100
         
         # Store episode results
@@ -473,28 +527,61 @@ def export_q_table_to_csv(q_table_path, csv_path):
             writer.writerow([str(state), str(action), value])
 
 class RandomAgent:
+    """
+    Random agent that uses gamma distribution demand forecasting for inventory decisions.
+    This agent generates demand forecasts using the same gamma distribution parameters
+    as the environment (alpha, beta) and makes ordering decisions based on these forecasts.
+    """
     def __init__(self, env):
         self.env = env
         self.action_space = env.action_space
+        
+    def get_gamma_demand_forecast(self, sku, forecast_days=7):
+        """Generate gamma distribution-based demand forecast for the SKU"""
+        # Use the same gamma parameters as the environment
+        alpha = sku.alpha
+        beta = sku.beta
+        
+        # Generate demand forecast using gamma distribution
+        forecast_demand = np.random.gamma(shape=alpha * forecast_days, scale=beta)
+        return max(0, forecast_demand)
+    
     def get_action(self, state, env=None, greedy=False):
         num_skus = len(self.env.skus)
         num_locations = len(state) // num_skus
         order_quantities = np.zeros(num_skus, dtype=np.int32)
-        lead_time_reductions = np.zeros(num_skus, dtype=np.int32)
+        
         for i, sku_id in enumerate(self.env.skus):
             sku = self.env.skus[sku_id]
             sku_stocks = state[i*num_locations:(i+1)*num_locations]
-            target_level = sku.reorder_point
-            # If any location is below target, order up to target
-            if np.any(np.array(sku_stocks) < target_level):
-                order_quantities[i] = target_level - min(sku_stocks)
+            
+            # Generate gamma distribution-based demand forecast
+            forecast_demand = self.get_gamma_demand_forecast(sku, forecast_days=sku.lead_time_days)
+            
+            # Calculate target inventory level based on gamma demand forecast
+            # Target = forecast demand during lead time + safety stock
+            target_level = int(forecast_demand + sku.safety_stock)
+            
+            # Current stock across all locations for this SKU
+            current_total_stock = np.sum(sku_stocks)
+            
+            # Calculate order quantity based on gamma demand forecast
+            if current_total_stock < target_level:
+                order_quantities[i] = min(
+                    target_level - current_total_stock,
+                    sku.max_stock - current_total_stock  # Respect max stock limit
+                )
             else:
                 order_quantities[i] = 0
-        return np.concatenate([order_quantities, lead_time_reductions])
+                
+        return order_quantities
+        
     def learn(self, *args, **kwargs):
         return 0.0
+        
     def get_average_td_error(self):
         return 0.0
+        
     def save(self, path):
         pass
 
@@ -785,308 +872,283 @@ def generate_comprehensive_report(metrics_history, rewards_history, td_errors, s
     
     return report
 
+def plot_demand_comparison(gamma_results, fixed_results, save_dir):
+    """Plot comprehensive comparison between gamma and fixed demand scenarios"""
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    
+    # Colors for agents
+    colors = {'q_learning': '#2E86AB', 'dqn': '#A23B72', 'random': '#F18F01'}
+    
+    # Metrics to compare
+    metrics = ['rewards', 'service_levels', 'episode_lengths']
+    metric_names = ['Average Reward', 'Service Level (%)', 'Episode Length']
+    
+    for i, (metric, name) in enumerate(zip(metrics, metric_names)):
+        # Gamma demand results
+        ax1 = axes[0, i]
+        agents = ['Q-Learning', 'Double DQN', 'Random']
+        gamma_values = [
+            np.mean(gamma_results['q_learning'][metric]),
+            np.mean(gamma_results['dqn'][metric]),
+            np.mean(gamma_results['random'][metric])
+        ]
+        
+        bars1 = ax1.bar(agents, gamma_values, color=list(colors.values()), alpha=0.8, edgecolor='black', linewidth=0.5)
+        ax1.set_title(f'{name} - Gamma Demand', fontsize=14, fontweight='bold')
+        ax1.set_ylabel(name, fontsize=12)
+        ax1.grid(True, alpha=0.3, axis='y')
+        
+        # Add value labels
+        for bar, value in zip(bars1, gamma_values):
+            height = bar.get_height()
+            ax1.text(bar.get_x() + bar.get_width()/2., height + max(gamma_values) * 0.01,
+                    f'{value:.1f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
+        
+        # Fixed demand results
+        ax2 = axes[1, i]
+        fixed_values = [
+            np.mean(fixed_results['q_learning'][metric]),
+            np.mean(fixed_results['dqn'][metric]),
+            np.mean(fixed_results['random'][metric])
+        ]
+        
+        bars2 = ax2.bar(agents, fixed_values, color=list(colors.values()), alpha=0.8, edgecolor='black', linewidth=0.5)
+        ax2.set_title(f'{name} - Fixed Demand', fontsize=14, fontweight='bold')
+        ax2.set_ylabel(name, fontsize=12)
+        ax2.grid(True, alpha=0.3, axis='y')
+        
+        # Add value labels
+        for bar, value in zip(bars2, fixed_values):
+            height = bar.get_height()
+            ax2.text(bar.get_x() + bar.get_width()/2., height + max(fixed_values) * 0.01,
+                    f'{value:.1f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
+    
+    plt.tight_layout(pad=3.0)
+    os.makedirs(save_dir, exist_ok=True)
+    plt.savefig(os.path.join(save_dir, 'gamma_vs_fixed_demand_comparison.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+
+def plot_combined_histograms(gamma_results, fixed_results, save_dir):
+    """Plot combined histograms showing reward distributions for both demand types"""
+    fig, axes = plt.subplots(1, 2, figsize=(20, 8))
+    
+    # Colors for agents
+    colors = ['#2E86AB', '#A23B72', '#F18F01']
+    agents = ['Q-Learning', 'Double DQN', 'Random']
+    
+    # Gamma demand histogram
+    ax1 = axes[0]
+    all_gamma_rewards = (gamma_results['q_learning']['rewards'] + 
+                        gamma_results['dqn']['rewards'] + 
+                        gamma_results['random']['rewards'])
+    min_reward = min(all_gamma_rewards)
+    max_reward = max(all_gamma_rewards)
+    bins = np.linspace(min_reward, max_reward, 30)
+    
+    ax1.hist(gamma_results['q_learning']['rewards'], bins=bins, alpha=0.7, 
+             label='Q-Learning', color=colors[0], edgecolor='black', linewidth=0.5)
+    ax1.hist(gamma_results['dqn']['rewards'], bins=bins, alpha=0.7, 
+             label='Double DQN', color=colors[1], edgecolor='black', linewidth=0.5)
+    ax1.hist(gamma_results['random']['rewards'], bins=bins, alpha=0.7, 
+             label='Random', color=colors[2], edgecolor='black', linewidth=0.5)
+    
+    ax1.set_xlabel('Episode Reward', fontsize=14)
+    ax1.set_ylabel('Frequency', fontsize=14)
+    ax1.set_title('Reward Distribution - Gamma Demand', fontsize=16, fontweight='bold')
+    ax1.legend(fontsize=12)
+    ax1.grid(True, alpha=0.3)
+    
+    # Fixed demand histogram
+    ax2 = axes[1]
+    all_fixed_rewards = (fixed_results['q_learning']['rewards'] + 
+                        fixed_results['dqn']['rewards'] + 
+                        fixed_results['random']['rewards'])
+    min_reward = min(all_fixed_rewards)
+    max_reward = max(all_fixed_rewards)
+    bins = np.linspace(min_reward, max_reward, 30)
+    
+    ax2.hist(fixed_results['q_learning']['rewards'], bins=bins, alpha=0.7, 
+             label='Q-Learning', color=colors[0], edgecolor='black', linewidth=0.5)
+    ax2.hist(fixed_results['dqn']['rewards'], bins=bins, alpha=0.7, 
+             label='Double DQN', color=colors[1], edgecolor='black', linewidth=0.5)
+    ax2.hist(fixed_results['random']['rewards'], bins=bins, alpha=0.7, 
+             label='Random', color=colors[2], edgecolor='black', linewidth=0.5)
+    
+    ax2.set_xlabel('Episode Reward', fontsize=14)
+    ax2.set_ylabel('Frequency', fontsize=14)
+    ax2.set_title('Reward Distribution - Fixed Demand', fontsize=16, fontweight='bold')
+    ax2.legend(fontsize=12)
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    os.makedirs(save_dir, exist_ok=True)
+    plt.savefig(os.path.join(save_dir, 'combined_reward_histograms.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+
+def run_agent_experiments(env, results_dir, num_episodes=5000, eval_episodes=100):
+    """Run experiments for all three agents and return evaluation metrics"""
+    results = {}
+    
+    # Q-learning agent
+    print("Training Q-learning agent...")
+    td_agent = TDAgent(
+        action_space=env.action_space,
+        discount_factor=0.995,
+        learning_rate=0.05,
+        epsilon=1.0,
+        epsilon_min=0.01,
+        epsilon_decay=0.9999
+    )
+    
+    td_rewards_history, td_metrics_history, td_episode_lengths, td_errors = train(
+        env, td_agent, num_episodes=num_episodes, max_steps=500
+    )
+    
+    print("Evaluating Q-learning agent...")
+    td_eval_metrics = evaluate(env, td_agent, num_episodes=eval_episodes, max_steps=500)
+    results['q_learning'] = td_eval_metrics
+    
+    # Double DQN agent
+    print("Training Double DQN agent...")
+    dqn_agent = DoubleDQNAgent(
+        action_space=env.action_space,
+        discount_factor=0.98,
+        learning_rate=0.001,
+        epsilon=1.0
+    )
+    dqn_agent.batch_size = 32
+    dqn_agent.epsilon_decay = 0.9995
+    dqn_agent.update_target_every = 3
+    dqn_agent.learning_starts = 100
+    
+    dqn_rewards_history, dqn_metrics_history, dqn_episode_lengths, dqn_errors = train(
+        env, dqn_agent, num_episodes=num_episodes, max_steps=500
+    )
+    
+    print("Evaluating Double DQN agent...")
+    dqn_eval_metrics = evaluate(env, dqn_agent, num_episodes=eval_episodes, max_steps=500)
+    results['dqn'] = dqn_eval_metrics
+    
+    # Random agent
+    print("Evaluating Random agent...")
+    random_agent = RandomAgent(env)
+    random_metrics = evaluate(env, random_agent, num_episodes=eval_episodes, max_steps=500,
+                             episode_lengths_override=td_eval_metrics['episode_lengths'])
+    results['random'] = random_metrics
+    
+    return results
+
 def main():
     # Create results directory
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     results_dir = f'results_{timestamp}'
     os.makedirs(results_dir, exist_ok=True)
     
-    # Initialize environment and agents
-    env = InventoryEnvironment()
-    print("\n[INFO] Demand variability has been reduced for all SKUs (FMCG scenario).\n")
-    for sku_id, sku in env.skus.items():
+    print("="*80)
+    print("COMPREHENSIVE AGENT COMPARISON: GAMMA vs FIXED DEMAND")
+    print("="*80)
+    
+    # Experiment 1: Gamma Distribution Demand
+    print("\n" + "="*50)
+    print("EXPERIMENT 1: GAMMA DISTRIBUTION DEMAND")
+    print("="*50)
+    
+    env_gamma = InventoryEnvironment()
+    print("\n[INFO] Testing with gamma distribution demand (default)...")
+    for sku_id, sku in env_gamma.skus.items():
         print(f"SKU {sku_id}: alpha={sku.alpha}, beta={sku.beta}")
     
-    # Q-learning agent
-    td_agent = TDAgent(
-        action_space=env.action_space,
-        discount_factor=0.995,  # More focus on long-term rewards
-        learning_rate=0.05,     # Smaller, more stable updates
-        epsilon=1.0,
-        epsilon_min=0.01,       # Allow more exploration
-        epsilon_decay=0.9999    # Slower decay for more stable learning
-    )
+    gamma_results = run_agent_experiments(env_gamma, results_dir, num_episodes=5000, eval_episodes=100)
     
-    # Double DQN agent
-    dqn_agent = DoubleDQNAgent(
-        action_space=env.action_space,
-        discount_factor=0.98,   # Slightly less focus on long-term rewards for faster learning
-        learning_rate=0.001,    # Higher learning rate for faster updates
-        epsilon=1.0             # Initial exploration
-    )
-    # Manually override DQN agent's batch size and target update frequency for faster learning
-    dqn_agent.batch_size = 32  # Reduced from 64 for more frequent updates
-    dqn_agent.epsilon_decay = 0.9995  # Faster decay for quicker exploitation
-    dqn_agent.update_target_every = 3  # Update target network more frequently
-    dqn_agent.learning_starts = 100  # Start learning earlier
+    # Experiment 2: Fixed Demand
+    print("\n" + "="*50)
+    print("EXPERIMENT 2: FIXED DEMAND")
+    print("="*50)
     
-    # Training parameters
-    num_episodes = 10000  # Reduced from 1500 for faster training
-    eval_interval = 100
+    fixed_config = env_gamma.config.copy()
+    fixed_config['use_fixed_demand'] = True
+    fixed_config['fixed_daily_demand'] = 5
+    env_fixed = InventoryEnvironment(config=fixed_config)
+    print(f"\n[INFO] Testing with fixed demand (daily demand = {fixed_config['fixed_daily_demand']})...")
     
-    print("Starting training for Q-learning agent...")
-    print(f"Training will run for {num_episodes} episodes")
+    fixed_results = run_agent_experiments(env_fixed, results_dir, num_episodes=5000, eval_episodes=100)
     
-    # Train Double Q-learning agent
-    td_rewards_history, td_metrics_history, td_episode_lengths, td_errors = train(
-        env, 
-        td_agent,
-        num_episodes=num_episodes,
-        max_steps=500
-    )
+    # Create comparison plots
+    print("\n" + "="*50)
+    print("GENERATING COMPARISON PLOTS")
+    print("="*50)
     
-    # Plot training progress for Q-learning
-    plot_training_progress(td_rewards_history, td_errors, td_metrics_history, results_dir)
+    plot_demand_comparison(gamma_results, fixed_results, results_dir)
+    plot_combined_histograms(gamma_results, fixed_results, results_dir)
     
-    print("\nStarting training for Double DQN agent...")
-    print(f"Training will run for {num_episodes} episodes")
+    # Save all results
+    all_results = {
+        'gamma_demand': {
+            'q_learning': convert_to_serializable(gamma_results['q_learning']),
+            'dqn': convert_to_serializable(gamma_results['dqn']),
+            'random': convert_to_serializable(gamma_results['random'])
+        },
+        'fixed_demand': {
+            'q_learning': convert_to_serializable(fixed_results['q_learning']),
+            'dqn': convert_to_serializable(fixed_results['dqn']),
+            'random': convert_to_serializable(fixed_results['random'])
+        }
+    }
     
-    # Train Double DQN agent
-    dqn_rewards_history, dqn_metrics_history, dqn_episode_lengths, dqn_errors = train(
-        env, 
-        dqn_agent,
-        num_episodes=num_episodes,
-        max_steps=500
-    )
+    with open(os.path.join(results_dir, 'comprehensive_comparison_results.json'), 'w') as f:
+        json.dump(all_results, f, indent=4)
     
-    # Plot training progress for Double DQN with enhanced metrics
-    os.makedirs(results_dir, exist_ok=True)
-    plot_training_progress(dqn_rewards_history, dqn_errors, dqn_metrics_history, results_dir)
+    # Print comprehensive summary
+    print("\n" + "="*80)
+    print("COMPREHENSIVE RESULTS SUMMARY")
+    print("="*80)
     
-    # Generate comprehensive performance report
-    print("\nGenerating comprehensive performance report...")
-    comprehensive_report = generate_comprehensive_report(dqn_metrics_history, dqn_rewards_history, dqn_errors, results_dir)
+    print("\nGAMMA DEMAND RESULTS:")
+    print("-" * 40)
+    for agent_name, metrics in gamma_results.items():
+        agent_display = agent_name.replace('_', ' ').title()
+        print(f"{agent_display}:")
+        print(f"  Average Reward: {np.mean(metrics['rewards']):.2f}")
+        print(f"  Service Level: {np.mean(metrics['service_levels']):.1f}%")
+        print(f"  Episode Length: {np.mean(metrics['episode_lengths']):.2f}")
+        print(f"  Total Stockouts: {sum([np.mean(metrics['location_stockouts'][loc]) for loc in ['Location_1', 'Location_2', 'Location_3', 'Retail']]):.2f}")
+        print()
     
-    # Plot moving average of TD error
-    plot_moving_average(
-        dqn_errors,
-        window=100,
-        title='DQN TD Error (Moving Average, window=100)',
-        ylabel='TD Error',
-        save_path=os.path.join(results_dir, 'dqn_td_error_moving_avg.png')
-    )
-    # Plot moving average of reward
-    plot_moving_average(
-        dqn_rewards_history,
-        window=100,
-        title='DQN Reward (Moving Average, window=100)',
-        ylabel='Reward',
-        save_path=os.path.join(results_dir, 'dqn_reward_moving_avg.png')
-    )
+    print("FIXED DEMAND RESULTS:")
+    print("-" * 40)
+    for agent_name, metrics in fixed_results.items():
+        agent_display = agent_name.replace('_', ' ').title()
+        print(f"{agent_display}:")
+        print(f"  Average Reward: {np.mean(metrics['rewards']):.2f}")
+        print(f"  Service Level: {np.mean(metrics['service_levels']):.1f}%")
+        print(f"  Episode Length: {np.mean(metrics['episode_lengths']):.2f}")
+        print(f"  Total Stockouts: {sum([np.mean(metrics['location_stockouts'][loc]) for loc in ['Location_1', 'Location_2', 'Location_3', 'Retail']]):.2f}")
+        print()
     
-    # Evaluate all agents
-    print("\nEvaluating Q-learning agent...")
-    td_eval_metrics = evaluate(env, td_agent, num_episodes=100, max_steps=500)
+    print("PERFORMANCE COMPARISON (Gamma vs Fixed):")
+    print("-" * 40)
+    for agent_name in ['q_learning', 'dqn', 'random']:
+        agent_display = agent_name.replace('_', ' ').title()
+        gamma_reward = np.mean(gamma_results[agent_name]['rewards'])
+        fixed_reward = np.mean(fixed_results[agent_name]['rewards'])
+        improvement = ((gamma_reward - fixed_reward) / fixed_reward) * 100 if fixed_reward != 0 else 0
+        
+        print(f"{agent_display}:")
+        print(f"  Reward improvement with gamma: {improvement:+.1f}%")
+        
+        gamma_service = np.mean(gamma_results[agent_name]['service_levels'])
+        fixed_service = np.mean(fixed_results[agent_name]['service_levels'])
+        service_diff = gamma_service - fixed_service
+        
+        print(f"  Service level difference: {service_diff:+.1f}%")
+        print()
     
-    print("\nEvaluating Double DQN agent...")
-    dqn_eval_metrics = evaluate(env, dqn_agent, num_episodes=100, max_steps=500)
-    
-    print("\nEvaluating random agent...")
-    random_agent = RandomAgent(env)
-    random_metrics = evaluate(env, random_agent, num_episodes=100, max_steps=500, 
-                             episode_lengths_override=td_eval_metrics['episode_lengths'])
-    
-    # Plot evaluation results
-    plot_cumulative_reward(td_eval_metrics, results_dir)
-    plot_location_stockouts(td_eval_metrics, results_dir)
-    
-    # Plot histogram comparing average rewards for all three agents
-    plt.figure(figsize=(14, 8))
-    
-    # Calculate statistics for better scaling
-    all_rewards = td_eval_metrics['rewards'] + dqn_eval_metrics['rewards'] + random_metrics['rewards']
-    min_reward = min(all_rewards)
-    max_reward = max(all_rewards)
-    
-    # Create histogram with better styling
-    bins = np.linspace(min_reward, max_reward, 30)
-    
-    plt.hist(td_eval_metrics['rewards'], bins=bins, alpha=0.7, label='Double Q-learning Agent', 
-             color='#2E86AB', edgecolor='black', linewidth=0.5)
-    plt.hist(dqn_eval_metrics['rewards'], bins=bins, alpha=0.7, label='Double DQN Agent', 
-             color='#A23B72', edgecolor='black', linewidth=0.5)
-    plt.hist(random_metrics['rewards'], bins=bins, alpha=0.7, label='Random Agent', 
-             color='#F18F01', edgecolor='black', linewidth=0.5)
-    
-    plt.xlabel('Episode Reward', fontsize=14)
-    plt.ylabel('Frequency', fontsize=14)
-    plt.title('Reward Distribution: Q-learning vs Double DQN vs Random Agent', fontsize=16, fontweight='bold')
-    plt.legend(fontsize=12)
-    plt.grid(True, alpha=0.3)
-    
-    # Add vertical lines for means
-    mean_td = np.mean(td_eval_metrics['rewards'])
-    mean_dqn = np.mean(dqn_eval_metrics['rewards'])
-    mean_random = np.mean(random_metrics['rewards'])
-    
-    plt.axvline(mean_td, color='#2E86AB', linestyle='--', linewidth=2, alpha=0.8, 
-                label=f'Q-learning Mean: {mean_td:.1f}')
-    plt.axvline(mean_dqn, color='#A23B72', linestyle='--', linewidth=2, alpha=0.8, 
-                label=f'DQN Mean: {mean_dqn:.1f}')
-    plt.axvline(mean_random, color='#F18F01', linestyle='--', linewidth=2, alpha=0.8, 
-                label=f'Random Mean: {mean_random:.1f}')
-    
-    plt.tight_layout()
-    os.makedirs(results_dir, exist_ok=True)
-    plt.savefig(os.path.join(results_dir, 'reward_histogram.png'), dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    # Save evaluation metrics
-    td_eval_metrics_serializable = convert_to_serializable(td_eval_metrics)
-    dqn_eval_metrics_serializable = convert_to_serializable(dqn_eval_metrics)
-    random_metrics_serializable = convert_to_serializable(random_metrics)
-    
-    with open(os.path.join(results_dir, 'td_evaluation_metrics.json'), 'w') as f:
-        json.dump(td_eval_metrics_serializable, f, indent=4)
-    with open(os.path.join(results_dir, 'dqn_evaluation_metrics.json'), 'w') as f:
-        json.dump(dqn_eval_metrics_serializable, f, indent=4)
-    with open(os.path.join(results_dir, 'random_evaluation_metrics.json'), 'w') as f:
-        json.dump(random_metrics_serializable, f, indent=4)
-    
-    print(f"\nResults saved in {results_dir}")
-    print("\nEvaluation Results:")
-    print(f"Average Reward (Q-learning): {np.mean(td_eval_metrics['rewards']):.2f}")
-    print(f"Average Reward (Double DQN): {np.mean(dqn_eval_metrics['rewards']):.2f}")
-    print(f"Average Reward (Random): {np.mean(random_metrics['rewards']):.2f}")
-    print(f"Average Service Level (Q-learning): {np.mean(td_eval_metrics['service_levels']):.1f}%")
-    print(f"Average Service Level (Double DQN): {np.mean(dqn_eval_metrics['service_levels']):.1f}%")
-    print(f"Average Service Level (Random): {np.mean(random_metrics['service_levels']):.1f}%")
-    print(f"Average Episode Length (Q-learning): {np.mean(td_eval_metrics['episode_lengths']):.2f}")
-    print(f"Average Episode Length (Double DQN): {np.mean(dqn_eval_metrics['episode_lengths']):.2f}")
-    print(f"Average Episode Length (Random): {np.mean(random_metrics['episode_lengths']):.2f}")
-    
-    print("\nAverage Stockouts by Location:")
-    for location in ['Location_1', 'Location_2', 'Location_3', 'Retail']:
-        avg_stockouts_td = np.mean(td_eval_metrics['location_stockouts'][location])
-        avg_stockouts_dqn = np.mean(dqn_eval_metrics['location_stockouts'][location])
-        avg_stockouts_random = np.mean(random_metrics['location_stockouts'][location])
-        print(f"{location} (Q-learning): {avg_stockouts_td:.2f}")
-        print(f"{location} (Double DQN): {avg_stockouts_dqn:.2f}")
-        print(f"{location} (Random): {avg_stockouts_random:.2f}")
-
-    # Plot bar chart comparing metrics for all three agents
-    labels = ['Service Level', 'Stockouts L1', 'Stockouts L2', 'Stockouts L3', 'Stockouts Retail', 'Ep. Length']
-    
-    td_values = [
-        np.mean(td_eval_metrics['service_levels']),
-        np.mean(td_eval_metrics['location_stockouts']['Location_1']),
-        np.mean(td_eval_metrics['location_stockouts']['Location_2']),
-        np.mean(td_eval_metrics['location_stockouts']['Location_3']),
-        np.mean(td_eval_metrics['location_stockouts']['Retail']),
-        np.mean(td_eval_metrics['episode_lengths'])
-    ]
-    
-    dqn_values = [
-        np.mean(dqn_eval_metrics['service_levels']),
-        np.mean(dqn_eval_metrics['location_stockouts']['Location_1']),
-        np.mean(dqn_eval_metrics['location_stockouts']['Location_2']),
-        np.mean(dqn_eval_metrics['location_stockouts']['Location_3']),
-        np.mean(dqn_eval_metrics['location_stockouts']['Retail']),
-        np.mean(dqn_eval_metrics['episode_lengths'])
-    ]
-    
-    random_values = [
-        np.mean(random_metrics['service_levels']),
-        np.mean(random_metrics['location_stockouts']['Location_1']),
-        np.mean(random_metrics['location_stockouts']['Location_2']),
-        np.mean(random_metrics['location_stockouts']['Location_3']),
-        np.mean(random_metrics['location_stockouts']['Retail']),
-        np.mean(random_metrics['episode_lengths'])
-    ]
-    
-    x = np.arange(len(labels))
-    width = 0.25
-    
-    plt.figure(figsize=(18, 10))
-    
-    # Create bars with better styling
-    bars1 = plt.bar(x - width, td_values, width, label='Q-learning', color='#2E86AB', alpha=0.8, edgecolor='black', linewidth=0.5)
-    bars2 = plt.bar(x, dqn_values, width, label='Double DQN', color='#A23B72', alpha=0.8, edgecolor='black', linewidth=0.5)
-    bars3 = plt.bar(x + width, random_values, width, label='Random', color='#F18F01', alpha=0.8, edgecolor='black', linewidth=0.5)
-    
-    # Add value labels on bars
-    def add_value_labels(bars, values):
-        for bar, value in zip(bars, values):
-            height = bar.get_height()
-            plt.text(bar.get_x() + bar.get_width()/2., height + max(values) * 0.01,
-                    f'{value:.1f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
-    
-    add_value_labels(bars1, td_values)
-    add_value_labels(bars2, dqn_values)
-    add_value_labels(bars3, random_values)
-    
-    plt.xlabel('Metrics', fontsize=14)
-    plt.ylabel('Value', fontsize=14)
-    plt.title('Comparison of Key Metrics: Double Q-learning vs Double DQN vs Random Agent', fontsize=16, fontweight='bold')
-    plt.xticks(x, labels, fontsize=12)
-    plt.legend(fontsize=12)
-    plt.grid(True, alpha=0.3, axis='y')
-    
-    # Set y-axis limits for better visibility
-    all_values = td_values + dqn_values + random_values
-    plt.ylim(0, max(all_values) * 1.15)
-    
-    plt.tight_layout()
-    os.makedirs(results_dir, exist_ok=True)
-    plt.savefig(os.path.join(results_dir, 'metrics_comparison_bar.png'), dpi=300, bbox_inches='tight')
-    plt.close()
-
-    # Create comprehensive comparison plot
-    plot_comprehensive_comparison(td_eval_metrics, dqn_eval_metrics, random_metrics, results_dir)
-
-    # Save performance summary
-    performance_df = save_performance_summary(td_eval_metrics, dqn_eval_metrics, random_metrics, results_dir)
-    print("\nPerformance Summary:")
-    print(performance_df.to_string(index=False))
-
-    # Save trained agents
-    td_agent.save(os.path.join(results_dir, 'trained_td_agent'))
-    dqn_agent.save(os.path.join(results_dir, 'trained_dqn_agent'))
-
-    # Export Q-table to CSV (use Q-table A for export)
-    q_table_path = os.path.join(results_dir, 'trained_td_agent_A.pkl')
-    csv_path = os.path.join(results_dir, 'td_q_table.csv')
-   
-    # Print average reward per step for all agents
-    avg_reward_per_step_td = np.mean(td_eval_metrics['rewards']) / np.mean(td_eval_metrics['episode_lengths'])
-    avg_reward_per_step_dqn = np.mean(dqn_eval_metrics['rewards']) / np.mean(dqn_eval_metrics['episode_lengths'])
-    avg_reward_per_step_random = np.mean(random_metrics['rewards']) / np.mean(random_metrics['episode_lengths'])
-    print(f"Average Reward per Step (Double Q-learning): {avg_reward_per_step_td:.2f}")
-    print(f"Average Reward per Step (Double DQN): {avg_reward_per_step_dqn:.2f}")
-    print(f"Average Reward per Step (Random): {avg_reward_per_step_random:.2f}")
-
-    # --- BENCHMARK: Fixed Demand ---
-    print("\nRunning fixed demand benchmark...")
-    benchmark_config = env.config.copy()
-    benchmark_config['use_fixed_demand'] = True
-    benchmark_config['fixed_daily_demand'] = 5  # You can adjust this value
-    env_benchmark = InventoryEnvironment(config=benchmark_config)
-    agent_benchmark = TDAgent(
-        action_space=env_benchmark.action_space,
-        discount_factor=0.99
-    )
-    rewards_bench, metrics_bench, episode_lengths_bench, td_errors_bench = train(
-        env_benchmark,
-        agent_benchmark,
-        num_episodes=5000,
-        max_steps=500
-    )
-    print("\nEvaluating benchmark agent...")
-    eval_metrics_bench = evaluate(env_benchmark, agent_benchmark, num_episodes=100, max_steps=500)
-    print("\nBenchmark Results (Fixed Demand):")
-    print(f"Average Reward: {np.mean(eval_metrics_bench['rewards']):.2f}")
-    print(f"Average Service Level: {np.mean(eval_metrics_bench['service_levels']):.1f}%")
-    print(f"Average Episode Length: {np.mean(eval_metrics_bench['episode_lengths']):.2f}")
-    print("Average Stockouts by Location:")
-    for location in ['Location_1', 'Location_2', 'Location_3', 'Retail']:
-        avg_stockouts = np.mean(eval_metrics_bench['location_stockouts'][location])
-        print(f"{location}: {avg_stockouts:.2f}")
-    # Save benchmark results
-    eval_metrics_bench_serializable = convert_to_serializable(eval_metrics_bench)
-    with open(os.path.join(results_dir, 'benchmark_evaluation_metrics.json'), 'w') as f:
-        json.dump(eval_metrics_bench_serializable, f, indent=4)
-
-    print("Environment initialized with constant lead times per SKU.")
+    print(f"\nAll results saved in: {results_dir}")
+    print("Key files generated:")
+    print("- gamma_vs_fixed_demand_comparison.png")
+    print("- combined_reward_histograms.png")
+    print("- comprehensive_comparison_results.json")
+    print("="*80)
 
 if __name__ == "__main__":
     # Set random seed for reproducibility
