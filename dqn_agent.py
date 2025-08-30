@@ -88,12 +88,29 @@ class DQNNetwork(nn.Module):
         nn.init.xavier_uniform_(self.fc5.weight)
         
     def forward(self, x):
-        # Enhanced forward pass with batch normalization and dropout
-        x = F.relu(self.bn1(self.fc1(x)))
-        x = self.dropout(x)
-        x = F.relu(self.bn2(self.fc2(x)))
-        x = self.dropout(x)
-        x = F.relu(self.bn3(self.fc3(x)))
+        # Enhanced forward pass with conditional batch normalization
+        # Handle single sample case during inference
+        use_bn = self.training and x.size(0) > 1
+        
+        x = self.fc1(x)
+        if use_bn:
+            x = self.bn1(x)
+        x = F.relu(x)
+        if self.training:
+            x = self.dropout(x)
+        
+        x = self.fc2(x)
+        if use_bn:
+            x = self.bn2(x)
+        x = F.relu(x)
+        if self.training:
+            x = self.dropout(x)
+        
+        x = self.fc3(x)
+        if use_bn:
+            x = self.bn3(x)
+        x = F.relu(x)
+        
         x = F.relu(self.fc4(x))
         return self.fc5(x)
 
